@@ -1,0 +1,276 @@
+#
+# Reference consumer-pipeline workflow (ADR-47).
+#
+# Copy this file into your application repository at
+# .github/workflows/build-and-promote.yml. Replace the placeholders
+# (between {{ }}) with the values the healthcare-iac maintainer posts on
+# your onboarding issue. After that, this is YOUR pipeline — modify it as
+# your application evolves.
+#
+# What it does (pull-deploy model — the default):
+#   1. Build a container image.
+#   2. Sign the image with cosign keyless (Sigstore).
+#   3. Push to your customer-scoped ECR repository in the dev account.
+#   4. Open an overlay-bump PR in healthcare-iac/deploy/overlays/dev/
+#      (auto-merged for dev). ArgoCD reconciles the new image.
+#   5. On `staging` Environment dispatch: re-sign + push to staging ECR,
+#      open an overlay-bump PR for staging (gated by Environment
+#      reviewers).
+#   6. On `prod` Environment dispatch: re-sign + push to prod ECR, open
+#      an overlay-bump PR for prod (gated by Environment reviewers).
+#
+# Why scoped role ARN variables: your repo doesn't see the prod ARN
+# unless your job is gated by the prod Environment, defending against a
+# compromised dev workflow leaking the prod role.
+#
+
+name: build-and-promote
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Promote to: staging | prod"
+        required: true
+        type: choice
+        options: [staging, prod]
+
+permissions:
+  contents: read
+  id-token: write # required for AWS OIDC federation
+  pull-requests: write # required to open overlay-bump PRs
+
+env:
+  CUSTOMER_CODE: "{{ .CustomerCode }}"
+  ECR_REPO_PREFIX: "{{ .EcrRepoPrefix }}"
+  IMAGE_NAME: app # change if your image name differs
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────
+  # Status gate — only build if healthcare-iac says "ready"
+  # ───────────────────────────────────────────────────────────────────
+  status:
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.check.outputs.status }}
+      sleep_state: ${{ steps.check.outputs.sleep-state }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - id: check
+        uses: TheSmallCompany/healthcare-iac/.github/actions/healthcare-iac-status@main
+        with:
+          customer-code: "{{ .CustomerCode }}"
+          contract-path: "infra-contract.yaml"
+          environment: "dev"
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+
+      - name: Fail closed if not ready
+        if: steps.check.outputs.status != 'ready'
+        run: |
+          echo "::error::healthcare-iac status is '${{ steps.check.outputs.status }}'; refusing to build."
+          echo "See onboarding issue or run \`./scripts/verify-consumer-cicd.sh\` against your contract for diagnostics."
+          exit 1
+
+  # ───────────────────────────────────────────────────────────────────
+  # Sleep-state gate (ADR-47 P6 / D9)
+  # ───────────────────────────────────────────────────────────────────
+  # Decides whether to proceed based on the target environment's
+  # sleep-state. Without this gate, pushing to a deep-sleep environment
+  # silently succeeds (image lands in ECR, no reconcile because EKS is
+  # destroyed) and the work disappears until someone notices.
+  #
+  #   awake       → proceed
+  #   light-sleep → warn + proceed (ArgoCD reconciles on wake)
+  #   deep-sleep  → fail fast with the wake command
+  #   unknown     → warn + proceed (defense-in-depth: status is the
+  #                  primary gate; sleep-state is supplementary)
+  #
+  # The check above outputs `sleep-state` from the SSM parameter
+  # /healthcare/<env>/sleep-state in your workload account. The
+  # consumer's OIDC role grants ssm:GetParameter on that path via the
+  # IAM boundary set by ConsumerCICDModule.
+  sleep-gate:
+    needs: status
+    runs-on: ubuntu-latest
+    steps:
+      - name: Decide based on sleep-state
+        env:
+          SLEEP_STATE: ${{ needs.status.outputs.sleep_state }}
+          CUSTOMER_CODE: "{{ .CustomerCode }}"
+        run: |
+          set -euo pipefail
+          case "$SLEEP_STATE" in
+            awake)
+              echo "::notice::dev is awake — proceeding with build"
+              ;;
+            light-sleep)
+              echo "::warning::dev is in light-sleep — build will proceed; ArgoCD will reconcile when the cluster wakes."
+              ;;
+            unknown)
+              echo "::warning::sleep-state could not be determined (returned 'unknown') — proceeding without gate. Verify aws-role-arn input on the status step."
+              ;;
+            deep-sleep)
+              echo "::error::dev is in deep-sleep — refusing to push because ArgoCD will not reconcile."
+              echo ""
+              echo "Wake before deploying:"
+              echo "  Slack: /infra deep-wake ${CUSTOMER_CODE} dev"
+              echo "  or: gh workflow run \"Dev Infrastructure Sleep/Wake\" \\"
+              echo "        --field action=deep-wake \\"
+              echo "        --field customer=${CUSTOMER_CODE} \\"
+              echo "        --field environment=dev"
+              exit 1
+              ;;
+            *)
+              echo "::error::Unexpected sleep-state value '$SLEEP_STATE' — failing closed."
+              exit 1
+              ;;
+          esac
+
+  # ───────────────────────────────────────────────────────────────────
+  # Dev — every main push pushes to dev ECR + auto-bumps dev overlay
+  # ───────────────────────────────────────────────────────────────────
+  build-dev:
+    needs: [status, sleep-gate]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC, dev)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_DEV }}
+          aws-region: us-east-1
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v3
+
+      - name: Build image
+        run: |
+          docker build \
+            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
+            .
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Push image
+        run: |
+          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      - name: Sign image (Sigstore keyless)
+        run: |
+          cosign sign --yes \
+            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      - name: Open overlay-bump PR (dev)
+        # Replace this with whatever overlay-bump tool you use. The
+        # canonical implementation in healthcare-iac uses a small
+        # GitHub App-authenticated job; consumers can also use
+        # nested-action tools like `peter-evans/create-pull-request`.
+        run: |
+          echo "TODO: open PR against TheSmallCompany/healthcare-iac"
+          echo "      bumping deploy/overlays/dev/${CUSTOMER_CODE}/kustomization.yaml"
+          echo "      to image tag ${GITHUB_SHA}"
+
+  # ───────────────────────────────────────────────────────────────────
+  # Staging — main-only, GitHub Environment-gated
+  # ───────────────────────────────────────────────────────────────────
+  promote-staging:
+    needs: status
+    if: github.event_name == 'workflow_dispatch' && inputs.target_env == 'staging'
+    runs-on: ubuntu-latest
+    environment: staging # Environment reviewers gate this
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC, staging)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          # Variable scoped to the staging Environment — defense in depth.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
+          aws-region: us-east-1
+
+      - name: Login to ECR (staging)
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v3
+
+      - name: Build image (staging)
+        run: |
+          docker build \
+            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
+            .
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Push image (staging)
+        run: |
+          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      # Sigstore keyless required for staging per ADR-47 §D8. The
+      # signature's OIDC sub-claim includes `environment:staging`, which
+      # the cluster's Kyverno verify-image policy pins.
+      - name: Sign image (Sigstore keyless, staging)
+        run: |
+          cosign sign --yes \
+            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      - name: Open overlay-bump PR (staging)
+        run: |
+          echo "TODO: open PR against TheSmallCompany/healthcare-iac"
+          echo "      bumping deploy/overlays/staging/${CUSTOMER_CODE}/kustomization.yaml"
+
+  # ───────────────────────────────────────────────────────────────────
+  # Prod — Environment-gated; sub-claim must include `environment:prod`
+  # ───────────────────────────────────────────────────────────────────
+  promote-prod:
+    needs: status
+    if: github.event_name == 'workflow_dispatch' && inputs.target_env == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod # Environment reviewers gate this
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Configure AWS credentials (OIDC, prod)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          # Variable scoped to the prod Environment — only this job sees it.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN_PROD }}
+          aws-region: us-east-1
+
+      - name: Login to ECR (prod)
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v3
+
+      - name: Build image (prod)
+        run: |
+          docker build \
+            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
+            .
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Push image (prod)
+        run: |
+          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      # Sigstore keyless required for prod per ADR-47 §D8. The signature's
+      # OIDC sub-claim includes `environment:prod`, which the cluster's
+      # Kyverno verify-image policy pins — only signatures produced by
+      # this exact prod-gated job satisfy admission.
+      - name: Sign image (Sigstore keyless, prod)
+        run: |
+          cosign sign --yes \
+            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+
+      - name: Open overlay-bump PR (prod)
+        run: |
+          echo "TODO: open PR against TheSmallCompany/healthcare-iac"
+          echo "      bumping deploy/overlays/prod/${CUSTOMER_CODE}/kustomization.yaml"

@@ -1,0 +1,123 @@
+name: Customer Onboarding — Consumer CI/CD
+description: Request consumer CI/CD onboarding (OIDC role + permission boundary) for your application repository. Per ADR-47.
+title: "[onboarding] consumer CI/CD for <customer-code>"
+labels: ["onboarding"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Consumer CI/CD onboarding
+
+        File this issue to onboard a customer repository for OIDC-federated
+        deploys into the healthcare-iac AWS workload accounts. The full flow is
+        documented in [`ONBOARDING.md`](../blob/main/ONBOARDING.md);
+        this issue is the authoritative status thread for your onboarding.
+
+        **What happens after you submit:**
+
+        1. A maintainer triages this issue and assigns it.
+        2. You install the `Healthcare IaC Cross-Repo` GitHub App on the
+           repository named below.
+        3. You comment `/bind <customer-code> <installation-id> <owner>/<repo>`.
+        4. The maintainer reviews and runs the bind; the bot confirms.
+        5. The maintainer opens a contract PR for your `cicd:` block; once
+           merged, your role ARNs are exported by the foundation stack.
+        6. You configure GitHub Environments + branch protection per the guide.
+
+        File first, fill in fields as they become available — required fields
+        are marked with **\***.
+
+  # ── Identity ──────────────────────────────────────────────────────────────
+
+  - type: input
+    id: customer_code
+    attributes:
+      label: Customer code *
+      description: |
+        Lowercase alphanumeric, 3-12 characters, starts with a letter, no
+        hyphens. Must match the contract validator regex `^[a-z][a-z0-9]{2,11}$`.
+        Examples: `acme1`, `tsc0`, `paydoc`. The maintainer will tell you the
+        assigned code if you don't already have one.
+      placeholder: "acme1"
+    validations:
+      required: true
+
+  - type: input
+    id: github_repo
+    attributes:
+      label: GitHub repository *
+      description: |
+        `<owner>/<repo>` you'll deploy from. The Healthcare IaC Cross-Repo App
+        must be installed on this repo (you'll do this after the issue is
+        triaged). Only one repo per customer code.
+      placeholder: "acme/healthcare-app"
+    validations:
+      required: true
+
+  - type: input
+    id: contact_email
+    attributes:
+      label: Primary contact email *
+      description: |
+        Reachable during onboarding. Will receive the role ARNs after the
+        contract PR merges.
+      placeholder: "platform@acme.com"
+    validations:
+      required: true
+
+  # ── Scope ────────────────────────────────────────────────────────────────
+
+  - type: checkboxes
+    id: environments
+    attributes:
+      label: Environments needed *
+      description: |
+        Pick the subset of environments your pipeline will deploy to. You can
+        add more later by amending the contract; the role for each environment
+        is provisioned independently.
+      options:
+        - label: "**dev** — any branch, no environment gate"
+          required: false
+        - label: "**staging** — main branch only"
+          required: false
+        - label: "**prod** — GitHub Environment-gated (requires reviewers)"
+          required: false
+
+  - type: dropdown
+    id: permissions_profile
+    attributes:
+      label: Permissions profile *
+      description: |
+        See [`service-catalog/cicd-defaults.yaml`](https://github.com/TheSmallCompany/healthcare-iac/blob/main/service-catalog/cicd-defaults.yaml).
+        Default is `ecr-push` (publish container images). Choose the smallest
+        profile that fits your deploy model.
+      options:
+        - "ecr-push (default — publish container images only; ArgoCD reconciles)"
+        - "ecr-push-and-eks-readonly (publish + read EKS state for healthcare-iac-status gate)"
+        - "push-deploy (publish + direct kubectl apply — requires justification)"
+      default: 0
+    validations:
+      required: true
+
+  - type: textarea
+    id: push_deploy_justification
+    attributes:
+      label: Justification (only if you picked push-deploy)
+      description: |
+        Why GitOps via ArgoCD doesn't fit your use case. Required for
+        `push-deploy`; ignored otherwise.
+      placeholder: "Our deploy process needs direct cluster mutation because…"
+
+  # ── Confirmations ─────────────────────────────────────────────────────────
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Confirmations
+      options:
+        - label: I've read [`ONBOARDING.md`](../blob/main/ONBOARDING.md).
+          required: true
+        - label: I have repo-admin access on the GitHub repository named above (required to install the App and configure Environments).
+          required: true
+        - label: I understand the App will be granted read access to repository metadata and (for `push-deploy`) write access for overlay-bump PRs. The App does NOT receive write access to my application code.
+          required: true

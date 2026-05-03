@@ -1,0 +1,54 @@
+# kustomization-bump — what an overlay-bump PR looks like
+#
+# After your build job pushes an image, an automated PR opens against
+# TheSmallCompany/healthcare-iac that updates the image tag in your
+# customer-scoped overlay. ArgoCD watches the overlay and reconciles
+# the new image into the workload cluster.
+#
+# This file is for reference — you don't write or copy it.
+
+# ── Before the bump ────────────────────────────────────────────────────
+# Path: deploy/overlays/dev/{{ .CustomerCode }}/kustomization.yaml
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: {{ .CustomerCode }}-app
+
+resources:
+  - ../../base
+
+images:
+  - name: app
+    newName: {{ .DevAccountId }}.dkr.ecr.us-east-1.amazonaws.com/{{ .EcrRepoPrefix }}app
+    newTag: 4f2c3a... # ← previous git SHA
+
+# ── After the bump ─────────────────────────────────────────────────────
+# Same path, only the `newTag:` line changes.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: {{ .CustomerCode }}-app
+
+resources:
+  - ../../base
+
+images:
+  - name: app
+    newName: {{ .DevAccountId }}.dkr.ecr.us-east-1.amazonaws.com/{{ .EcrRepoPrefix }}app
+    newTag: 9d8b1f... # ← new git SHA from your latest main commit
+
+# ── PR shape ───────────────────────────────────────────────────────────
+#
+#   Title:  bump {{ .CustomerCode }}/dev to <short-sha>
+#   Author: healthcare-iac-cross-repo[bot]
+#   Branch: bot/{{ .CustomerCode }}/dev/<short-sha>
+#   Files:  deploy/overlays/dev/{{ .CustomerCode }}/kustomization.yaml
+#   Labels: overlay-bump, customer:{{ .CustomerCode }}, env:dev
+#   Auto-merge: ENABLED for env:dev (per CODEOWNERS rules)
+#                DISABLED for env:staging and env:prod (require human review)
+#
+# Per ADR-47 D2 the overlay-bump PR is the only path that mutates
+# overlay state. Direct pushes to `deploy/overlays/{customer}/**` are
+# blocked by CODEOWNERS + branch protection.

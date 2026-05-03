@@ -1,0 +1,72 @@
+# Kyverno verify-image policy — REFERENCE ONLY
+#
+# This snippet shows what runs cluster-side in your workload account to
+# enforce Sigstore signature verification on container images. The
+# policy is applied by healthcare-iac (P5 deliverable in the ADR-47
+# rollout); you don't apply it. Knowing what it looks like helps you
+# debug why an admission was denied.
+#
+# Source: ADR-47 §D8 (image signing). Applied via the Kyverno install
+# documented in ADR-40.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-{{ .CustomerCode }}-images
+  annotations:
+    policies.kyverno.io/title: "Verify customer images via Sigstore keyless"
+    policies.kyverno.io/category: "Image Verification"
+    policies.kyverno.io/subject: "Pod"
+spec:
+  # Validate AND mutate — Kyverno mutates the image to its digest after
+  # successful verification, eliminating tag-mutability ambiguity.
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-{{ .CustomerCode }}-build-signatures
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - "{{ .CustomerCode }}-*" # your customer-scoped namespaces
+      verifyImages:
+        - imageReferences:
+            # Match images from your customer-scoped ECR repos in any
+            # of the three workload accounts. Replace {{ .EcrRepoPrefix }}
+            # with the contract's `cicd.ecr_repo_prefix` value.
+            - "*.dkr.ecr.us-east-1.amazonaws.com/{{ .EcrRepoPrefix }}*"
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    # Matches the GitHub OIDC issuer that signed the build.
+                    issuer: "https://token.actions.githubusercontent.com"
+                    # Matches the consumer OIDC role's sub-claim — only
+                    # signatures produced by THIS customer's pipeline are
+                    # accepted (no cross-customer image trust).
+                    subject: "https://github.com/{{ .OwnerRepo }}/.github/workflows/build-and-promote.yml@*"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          mutateDigest: true
+          required: true
+
+# ── What you'll see when this denies a deploy ───────────────────────────
+#
+# kubectl apply -f deployment.yaml
+# Error from server: error when creating "deployment.yaml": admission
+# webhook "validate.kyverno.svc-fail" denied the request: ...
+#   - rule verify-{{ .CustomerCode }}-build-signatures failed:
+#     no matching attestation found
+#
+# Three common causes:
+#   1. Image was built outside the consumer pipeline (no Sigstore sig).
+#   2. Pipeline ran but `cosign sign` step failed silently — re-run
+#      the build job and confirm the cosign step posts a "Pushed
+#      signature" log line.
+#   3. The image was built before image-signing was rolled out for
+#      your customer (P5). Re-build to get a signed copy.
+#
+# Audit logs of admission denials flow through to Security Lake (ADR-47 §D8)
+# and surface in `#security-image-admission`.

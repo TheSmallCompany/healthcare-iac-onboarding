@@ -1,0 +1,53 @@
+# healthcare-iac-status — quick reference
+#
+# This example shows how to call the composite action that gates your
+# pipeline on healthcare-iac's view of your contract. The action returns
+# `status: ready | provisioning | partial | blocked | unknown`. Treat
+# anything other than `ready` as a hard fail (the canonical workflow in
+# `build-and-promote.yml` does exactly this in the `status` job).
+#
+# Full action reference: .github/actions/healthcare-iac-status/action.yml
+
+- name: Check healthcare-iac status (dev)
+  uses: TheSmallCompany/healthcare-iac/.github/actions/healthcare-iac-status@main
+  with:
+    customer-code: "{{ .CustomerCode }}"
+    contract-path: "infra-contract.yaml" # path INSIDE your repo
+    environment: "dev"
+    aws-role-arn: ${{ vars.AWS_ROLE_ARN_DEV }} # repo variable
+    aws-region: us-east-1
+
+# Outputs:
+#   status        — ready | provisioning | partial | blocked | unknown
+#   sleep-state   — awake | light-sleep | deep-sleep | unknown
+#   contract-version
+#   provisioned-count
+#   pending-count
+#   blocking-issues  — JSON array of GitHub issue URLs
+#   details          — full JSON for diagnostics
+
+# Common patterns
+# ───────────────
+#
+# 1. Hard-fail when not ready (canonical):
+#
+#    - name: Fail closed if not ready
+#      if: steps.status.outputs.status != 'ready'
+#      run: |
+#        echo "::error::status=${{ steps.status.outputs.status }}"
+#        echo "Blocking: ${{ steps.status.outputs.blocking-issues }}"
+#        exit 1
+#
+# 2. Skip the build (instead of fail) when sleep-state isn't awake.
+#    Useful for nightly cron jobs that shouldn't fire during deep-sleep:
+#
+#    - name: Skip when sleeping
+#      if: steps.status.outputs.sleep-state != 'awake'
+#      run: |
+#        echo "::notice::infrastructure is ${{ steps.status.outputs.sleep-state }}; skipping"
+#        exit 0
+#
+# 3. Check status for the target environment (the gate that issues your
+#    OIDC token also passes the right ARN, so you don't need to switch
+#    by string here — just feed `${{ vars.AWS_ROLE_ARN_<ENV> }}` and
+#    `environment: "<env>"` into the action).
