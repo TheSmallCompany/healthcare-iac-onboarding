@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install bats-core
-        run: npm install -g bats@1.10.0
+        run: sudo npm install -g bats@1.10.0
       - name: Test composite actions
         run: |
           set -euo pipefail
