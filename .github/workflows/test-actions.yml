@@ -15,6 +15,7 @@ on:
     branches: [main]
     paths:
       - '.github/actions/**'
+      - '.github/workflows/test-actions.yml'
 
 permissions:
   contents: read
