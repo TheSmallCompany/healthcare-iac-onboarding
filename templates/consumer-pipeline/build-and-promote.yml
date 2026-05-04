@@ -60,7 +60,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - id: check
-        uses: TheSmallCompany/healthcare-iac/.github/actions/healthcare-iac-status@main
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/healthcare-iac-status@main
         with:
           customer-code: "{{ .CustomerCode }}"
           contract-path: "infra-contract.yaml"

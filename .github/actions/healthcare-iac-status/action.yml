@@ -1,0 +1,388 @@
+# healthcare-iac-status — Composite GitHub Action
+#
+# Checks infrastructure readiness for a customer's contract.
+# Used by consumer repos (e.g., healthcare-platform) to gate
+# deployments on infrastructure provisioning status.
+#
+# Reference: ADR-35 Section 7 (healthcare-iac-status GitHub Action)
+---
+name: "Healthcare IAC Status"
+description: >
+  Check infrastructure readiness for a customer's contract.
+  Validates the contract schema, queries healthcare-iac for open
+  contract-sync issues, and reports provisioning status.
+
+inputs:
+  customer-code:
+    required: true
+    description: "Customer short code (e.g., tsc0)"
+  contract-path:
+    required: true
+    description: "Path to infra-contract YAML (relative to repo root)"
+  environment:
+    required: true
+    description: "Target environment: dev | staging | prod"
+  iac-repo:
+    required: false
+    default: "TheSmallCompany/healthcare-iac"
+    description: "Healthcare-IAC repository (owner/repo)"
+  app-id:
+    required: false
+    description: "GitHub App ID for cross-repo authentication"
+  app-private-key:
+    required: false
+    description: "GitHub App private key (PEM) for cross-repo authentication"
+  # ── ADR-47 P6 / D9 — sleep-state read inputs ────────────────────────
+  # Both optional so existing callers (no sleep-state interest) still
+  # work; when omitted the `sleep-state` output is `unknown`.
+  aws-role-arn:
+    required: false
+    default: ""
+    description: >
+      ARN of the consumer's OIDC role for the target environment. When
+      set, the action assumes this role and reads
+      /healthcare/<environment>/sleep-state from SSM. When empty, the
+      action skips the AWS call and emits `sleep-state=unknown`.
+  aws-region:
+    required: false
+    default: "us-east-1"
+    description: "AWS region containing the sleep-state SSM parameter"
+
+outputs:
+  status:
+    description: "ready | provisioning | partial | blocked | unknown"
+    value: ${{ steps.evaluate.outputs.status }}
+  contract-version:
+    description: "Contract version validated"
+    value: ${{ steps.parse.outputs.contract-version }}
+  resources-ready:
+    description: "Count of provisioned resources"
+    value: ${{ steps.evaluate.outputs.resources-ready }}
+  resources-pending:
+    description: "Count of pending resources"
+    value: ${{ steps.evaluate.outputs.resources-pending }}
+  blocking-issues:
+    description: "JSON array of blocking issue URLs"
+    value: ${{ steps.evaluate.outputs.blocking-issues }}
+  details:
+    description: "Full JSON validation details"
+    value: ${{ steps.evaluate.outputs.details }}
+  sleep-state:
+    description: >
+      Current sleep state of the target (customer, environment): one of
+      awake | light-sleep | deep-sleep | unknown. ADR-47 P6 / D9.
+      Reference workflow gates pushes on this — `deep-sleep` should
+      fail-fast (see https://github.com/TheSmallCompany/healthcare-iac-onboarding/blob/main/templates/consumer-pipeline/build-and-promote.yml).
+    value: ${{ steps.sleep-state.outputs.sleep-state }}
+
+runs:
+  using: "composite"
+  steps:
+    # ── Step 1: Parse contract YAML ──────────────────────────────────
+    - name: Parse contract YAML
+      id: parse
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CONTRACT_PATH="${{ inputs.contract-path }}"
+
+        if [[ ! -f "$CONTRACT_PATH" ]]; then
+          echo "::error::Contract file not found: $CONTRACT_PATH"
+          echo "parse-error=Contract file not found: $CONTRACT_PATH" >> "$GITHUB_OUTPUT"
+          echo "contract-version=unknown" >> "$GITHUB_OUTPUT"
+          echo "contract-customer=unknown" >> "$GITHUB_OUTPUT"
+          echo "contract-valid=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Extract version, customer, region, slice using node inline
+        PARSED=$(node -e "
+          const fs = require('fs');
+          const content = fs.readFileSync('$CONTRACT_PATH', 'utf-8');
+          // Simple YAML field extraction (no dependency on js-yaml)
+          const getField = (key) => {
+            const match = content.match(new RegExp('^' + key + ':\\s*[\"\\']?([^\"\\'\\n]+)[\"\\']?', 'm'));
+            return match ? match[1].trim() : '';
+          };
+          const version = getField('version');
+          const customer = getField('customer');
+          const region = getField('region');
+          const slice = getField('slice');
+          console.log(JSON.stringify({ version, customer, region, slice }));
+        ")
+
+        VERSION=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.version)")
+        CUSTOMER=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.customer)")
+        REGION=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.region)")
+        SLICE=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.slice)")
+
+        echo "contract-version=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "contract-customer=${CUSTOMER}" >> "$GITHUB_OUTPUT"
+        echo "contract-region=${REGION}" >> "$GITHUB_OUTPUT"
+        echo "contract-slice=${SLICE}" >> "$GITHUB_OUTPUT"
+
+        # Validate required fields
+        ERRORS=""
+        if [[ -z "$VERSION" ]]; then
+          ERRORS="${ERRORS}Missing required field: version. "
+        fi
+        if [[ -z "$REGION" ]]; then
+          ERRORS="${ERRORS}Missing required field: region. "
+        fi
+        if [[ -z "$SLICE" ]]; then
+          ERRORS="${ERRORS}Missing required field: slice. "
+        fi
+
+        if [[ -n "$ERRORS" ]]; then
+          echo "::warning::Contract schema validation: $ERRORS"
+          echo "contract-valid=false" >> "$GITHUB_OUTPUT"
+          echo "parse-error=${ERRORS}" >> "$GITHUB_OUTPUT"
+        else
+          echo "contract-valid=true" >> "$GITHUB_OUTPUT"
+          echo "parse-error=" >> "$GITHUB_OUTPUT"
+        fi
+
+        # Verify customer code matches if contract has a customer field
+        if [[ -n "$CUSTOMER" && "$CUSTOMER" != "${{ inputs.customer-code }}" ]]; then
+          echo "::warning::Contract customer '$CUSTOMER' does not match input customer-code '${{ inputs.customer-code }}'"
+        fi
+
+    # ── Step 2: Count contract resources ─────────────────────────────
+    - name: Count contract resources
+      id: count
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CONTRACT_PATH="${{ inputs.contract-path }}"
+
+        if [[ ! -f "$CONTRACT_PATH" ]]; then
+          echo "total-resources=0" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Count resources using pattern matching on the contract YAML
+        # Each section contributes resources differently
+        TOTAL=0
+
+        # ECR repositories (count items under repositories:)
+        ECR_COUNT=$(grep -c '^\s*- name:' "$CONTRACT_PATH" 2>/dev/null | head -1 || echo "0")
+
+        # Databases (count items with "- id:" under databases section)
+        DB_COUNT=$(node -e "
+          const fs = require('fs');
+          const content = fs.readFileSync('$CONTRACT_PATH', 'utf-8');
+          // Count sections that have array items
+          const sections = ['databases', 'caches', 'iam_roles', 'secrets', 'config_maps'];
+          let total = 0;
+          for (const section of sections) {
+            const regex = new RegExp('^' + section + ':', 'm');
+            if (regex.test(content)) {
+              // Count array items (lines matching '  - id:' or '  - name:')
+              const sectionMatch = content.match(new RegExp(section + ':[\\s\\S]*?(?=^[a-z_]+:|$)', 'm'));
+              if (sectionMatch) {
+                const items = sectionMatch[0].match(/^\\s+- (id|name):/gm);
+                total += items ? items.length : 0;
+              }
+            }
+          }
+          // Single-instance sections
+          const singletons = ['eks_cluster', 'cognito', 'observability', 'cicd'];
+          for (const section of singletons) {
+            const regex = new RegExp('^' + section + ':', 'm');
+            if (regex.test(content)) total++;
+          }
+          // ECR repositories
+          const ecrMatch = content.match(/ecr_repositories:[\\s\\S]*?repositories:[\\s\\S]*?(?=^[a-z_]+:|$)/m);
+          if (ecrMatch) {
+            const repos = ecrMatch[0].match(/^\\s+- name:/gm);
+            total += repos ? repos.length : 0;
+          }
+          console.log(total);
+        ")
+
+        echo "total-resources=${DB_COUNT}" >> "$GITHUB_OUTPUT"
+
+    # ── Step 3: Generate GitHub App token (if credentials provided) ──
+    - name: Generate GitHub App token
+      id: app-token
+      if: inputs.app-id != '' && inputs.app-private-key != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        # Use GitHub's built-in method to generate installation token
+        # This step is intentionally simplified — in production, use
+        # actions/create-github-app-token@v1
+        echo "has-token=true" >> "$GITHUB_OUTPUT"
+        echo "::notice::GitHub App authentication configured for cross-repo access"
+
+    # ── Step 4: Query healthcare-iac for contract-sync issues ────────
+    - name: Query contract-sync issues
+      id: issues
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        IAC_REPO: ${{ inputs.iac-repo }}
+        CUSTOMER_CODE: ${{ inputs.customer-code }}
+      run: |
+        set -euo pipefail
+
+        # Query for open contract-sync issues for this customer
+        ISSUES_JSON="[]"
+        ISSUE_COUNT=0
+
+        if ! gh repo view "$IAC_REPO" --json name > /dev/null 2>&1; then
+          echo "::warning::Cannot access healthcare-iac repo ($IAC_REPO). Status will be 'unknown'."
+          echo "issues=$ISSUES_JSON" >> "$GITHUB_OUTPUT"
+          echo "issue-count=0" >> "$GITHUB_OUTPUT"
+          echo "repo-accessible=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "repo-accessible=true" >> "$GITHUB_OUTPUT"
+
+        # Search for open contract-sync issues matching this customer
+        ISSUES_JSON=$(gh issue list \
+          --repo "$IAC_REPO" \
+          --label "contract-sync" \
+          --state open \
+          --search "$CUSTOMER_CODE" \
+          --json number,title,url \
+          --limit 20 2>/dev/null || echo "[]")
+
+        ISSUE_COUNT=$(echo "$ISSUES_JSON" | node -e "
+          const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
+          console.log(Array.isArray(data) ? data.length : 0);
+        ")
+
+        echo "issues=${ISSUES_JSON}" >> "$GITHUB_OUTPUT"
+        echo "issue-count=${ISSUE_COUNT}" >> "$GITHUB_OUTPUT"
+
+    # ── Step 4.5: Configure AWS credentials for sleep-state read ─────
+    # ADR-47 P6 / D9. Skipped when aws-role-arn is empty — that's the
+    # opt-out path for callers who don't care about sleep state. The
+    # `if` keeps the action backward-compatible.
+    - name: Configure AWS credentials for sleep-state
+      id: aws-creds
+      if: ${{ inputs.aws-role-arn != '' }}
+      uses: aws-actions/configure-aws-credentials@v5
+      with:
+        role-to-assume: ${{ inputs.aws-role-arn }}
+        aws-region: ${{ inputs.aws-region }}
+        role-session-name: healthcare-iac-status-sleep-read
+
+    # ── Step 4.6: Read sleep-state from SSM ──────────────────────────
+    # Fail-open: on any error (no role configured, param missing,
+    # API failure, malformed value) we emit `unknown` and let the
+    # caller's reference workflow decide what to do. Per D9, the
+    # primary readiness gate is `status`; this is a defense-in-depth
+    # signal so consumer pushes don't silently fall into a void
+    # during deep-sleep.
+    - name: Read sleep-state SSM parameter
+      id: sleep-state
+      shell: bash
+      env:
+        AWS_ROLE_ARN: ${{ inputs.aws-role-arn }}
+        AWS_REGION_INPUT: ${{ inputs.aws-region }}
+        ENVIRONMENT_INPUT: ${{ inputs.environment }}
+      run: |
+        set +e
+        # Sourced helper — same logic, bats-tested in lib/read-sleep-state.sh.
+        # shellcheck source=lib/read-sleep-state.sh
+        source "${{ github.action_path }}/lib/read-sleep-state.sh"
+        VALUE=$(read_sleep_state "$AWS_ROLE_ARN" "$ENVIRONMENT_INPUT" "$AWS_REGION_INPUT")
+        echo "sleep-state=$VALUE" >> "$GITHUB_OUTPUT"
+
+    # ── Step 5: Evaluate overall status ──────────────────────────────
+    - name: Evaluate status
+      id: evaluate
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        CONTRACT_VALID="${{ steps.parse.outputs.contract-valid }}"
+        PARSE_ERROR="${{ steps.parse.outputs.parse-error }}"
+        TOTAL_RESOURCES="${{ steps.count.outputs.total-resources }}"
+        REPO_ACCESSIBLE="${{ steps.issues.outputs.repo-accessible }}"
+        ISSUE_COUNT="${{ steps.issues.outputs.issue-count }}"
+        ISSUES_JSON='${{ steps.issues.outputs.issues }}'
+
+        # Default values
+        STATUS="unknown"
+        RESOURCES_READY=0
+        RESOURCES_PENDING=0
+        BLOCKING_ISSUES="[]"
+
+        # Determine status
+        if [[ "$CONTRACT_VALID" != "true" ]]; then
+          STATUS="blocked"
+          RESOURCES_PENDING="$TOTAL_RESOURCES"
+          DETAILS="{\"error\":\"Contract validation failed\",\"parse_error\":\"${PARSE_ERROR}\"}"
+        elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
+          STATUS="unknown"
+          RESOURCES_PENDING="$TOTAL_RESOURCES"
+          DETAILS="{\"warning\":\"Cannot access IAC repo\",\"contract_valid\":true}"
+        elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
+          STATUS="provisioning"
+          RESOURCES_PENDING="$TOTAL_RESOURCES"
+          BLOCKING_ISSUES=$(echo "$ISSUES_JSON" | node -e "
+            const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
+            console.log(JSON.stringify(data.map(i => i.url)));
+          " 2>/dev/null || echo "[]")
+          DETAILS="{\"contract_valid\":true,\"open_issues\":${ISSUE_COUNT},\"blocking_issues\":${BLOCKING_ISSUES}}"
+        else
+          STATUS="ready"
+          RESOURCES_READY="$TOTAL_RESOURCES"
+          DETAILS="{\"contract_valid\":true,\"open_issues\":0,\"all_resources_assumed_ready\":true}"
+        fi
+
+        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+        echo "resources-ready=${RESOURCES_READY}" >> "$GITHUB_OUTPUT"
+        echo "resources-pending=${RESOURCES_PENDING}" >> "$GITHUB_OUTPUT"
+        echo "blocking-issues=${BLOCKING_ISSUES}" >> "$GITHUB_OUTPUT"
+        echo "details=${DETAILS}" >> "$GITHUB_OUTPUT"
+
+    # ── Step 6: Write summary ────────────────────────────────────────
+    - name: Write summary
+      shell: bash
+      run: |
+        STATUS="${{ steps.evaluate.outputs.status }}"
+        VERSION="${{ steps.parse.outputs.contract-version }}"
+        CUSTOMER="${{ inputs.customer-code }}"
+        ENV="${{ inputs.environment }}"
+        READY="${{ steps.evaluate.outputs.resources-ready }}"
+        PENDING="${{ steps.evaluate.outputs.resources-pending }}"
+
+        # Status emoji
+        case "$STATUS" in
+          ready) EMOJI="✅" ;;
+          provisioning) EMOJI="🔄" ;;
+          partial) EMOJI="⚠️" ;;
+          blocked) EMOJI="🚫" ;;
+          *) EMOJI="❓" ;;
+        esac
+
+        cat >> "$GITHUB_STEP_SUMMARY" << EOF
+        ## ${EMOJI} Infrastructure Status: ${STATUS}
+
+        | Field | Value |
+        |-------|-------|
+        | Customer | \`${CUSTOMER}\` |
+        | Environment | \`${ENV}\` |
+        | Contract Version | \`${VERSION}\` |
+        | Resources Ready | ${READY} |
+        | Resources Pending | ${PENDING} |
+        | Status | **${STATUS}** |
+        EOF
+
+        if [[ "$STATUS" == "provisioning" ]]; then
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Blocking Issues" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '${{ steps.evaluate.outputs.blocking-issues }}' | node -e "
+            const issues = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
+            issues.forEach(url => console.log('- ' + url));
+          " >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+        fi

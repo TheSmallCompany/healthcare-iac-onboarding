@@ -59,4 +59,4 @@ the contract PR merges and the foundation stack provisions your roles.
 - [`ONBOARDING.md`](../../ONBOARDING.md) — customer-facing walkthrough
 - [`docs/runbooks/onboard-customer-cicd.md`](https://github.com/TheSmallCompany/healthcare-iac/blob/main/docs/runbooks/onboard-customer-cicd.md) — maintainer runbook (private repo)
 - [`docs/design/consumer-cicd-onboarding.md`](https://github.com/TheSmallCompany/healthcare-iac/blob/main/docs/design/consumer-cicd-onboarding.md) — ADR-47 design doc (private repo)
-- [`.github/actions/healthcare-iac-status/action.yml`](https://github.com/TheSmallCompany/healthcare-iac/blob/main/.github/actions/healthcare-iac-status/action.yml) — composite action reference (private repo)
+- [`.github/actions/healthcare-iac-status/`](../../.github/actions/healthcare-iac-status/) — composite action source (vendored here per ADR-47 R21)

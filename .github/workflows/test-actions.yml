@@ -1,0 +1,38 @@
+# Test composite actions with bats-core (ADR-47 R21 / F50).
+#
+# The action's bats tests previously lived in TheSmallCompany/healthcare-iac
+# but were never executed by any CI workflow there (F50). After R21 moved
+# the action source to this repo, this workflow brings the tests to life
+# as a real gate.
+name: Test composite actions
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/test-actions.yml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/actions/**'
+
+permissions:
+  contents: read
+
+jobs:
+  bats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install bats-core
+        run: npm install -g bats@1.10.0
+      - name: Test composite actions
+        run: |
+          set -euo pipefail
+          for dir in .github/actions/*/__tests__; do
+            if [[ -d "$dir" ]] && compgen -G "$dir/*.bats" > /dev/null; then
+              echo "::group::Testing $dir"
+              bats "$dir"/*.bats
+              echo "::endgroup::"
+            fi
+          done
