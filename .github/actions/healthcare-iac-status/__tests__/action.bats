@@ -210,6 +210,45 @@ JS
   [ "$VERSION" = "1.0.0" ]
 }
 
+# F63 regression: action.yml step 1 invokes node -e inline (bash double-quoted).
+# That pipeline strips one level of escapes vs. heredoc-into-file (which other
+# tests use). This test mirrors action.yml's exact invocation form so the
+# escape-pipeline bug actually surfaces here.
+@test "contract parsing: extracts quoted version via inline node -e (regression — F63)" {
+  cat >"$TEST_TMPDIR/quoted.yaml" <<'YAML'
+version: "6.0.0"
+customer: testcust
+region: us-east-1
+slice: 2
+YAML
+
+  CONTRACT_PATH="$TEST_TMPDIR/quoted.yaml"
+  PARSED=$(node -e "
+    const fs = require('fs');
+    const content = fs.readFileSync('$CONTRACT_PATH', 'utf-8');
+    const getField = (key) => {
+      const match = content.match(new RegExp('^' + key + ':\\\\s*[\"\\']?([^\"\\'\\n]+)[\"\\']?', 'm'));
+      return match ? match[1].trim() : '';
+    };
+    console.log(JSON.stringify({
+      version: getField('version'),
+      customer: getField('customer'),
+      region: getField('region'),
+      slice: getField('slice'),
+    }));
+  ")
+
+  VERSION=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.version)")
+  CUSTOMER=$(echo "$PARSED" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.customer)")
+  REGION=$(echo "$PARSED"  | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.region)")
+  SLICE=$(echo "$PARSED"   | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(d.slice)")
+
+  [ "$VERSION" = "6.0.0" ]
+  [ "$CUSTOMER" = "testcust" ]
+  [ "$REGION" = "us-east-1" ]
+  [ "$SLICE" = "2" ]
+}
+
 # ── Schema Validation Tests ────────────────────────────────────────────────
 
 @test "schema validation: passes for valid contract with all required fields" {

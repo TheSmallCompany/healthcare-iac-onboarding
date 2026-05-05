@@ -102,7 +102,7 @@ runs:
           const content = fs.readFileSync('$CONTRACT_PATH', 'utf-8');
           // Simple YAML field extraction (no dependency on js-yaml)
           const getField = (key) => {
-            const match = content.match(new RegExp('^' + key + ':\\s*[\"\\']?([^\"\\'\\n]+)[\"\\']?', 'm'));
+            const match = content.match(new RegExp('^' + key + ':\\\\s*[\"\\']?([^\"\\'\\n]+)[\"\\']?', 'm'));
             return match ? match[1].trim() : '';
           };
           const version = getField('version');
@@ -180,7 +180,7 @@ runs:
             const regex = new RegExp('^' + section + ':', 'm');
             if (regex.test(content)) {
               // Count array items (lines matching '  - id:' or '  - name:')
-              const sectionMatch = content.match(new RegExp(section + ':[\\s\\S]*?(?=^[a-z_]+:|$)', 'm'));
+              const sectionMatch = content.match(new RegExp(section + ':[\\\\s\\\\S]*?(?=^[a-z_]+:|$)', 'm'));
               if (sectionMatch) {
                 const items = sectionMatch[0].match(/^\\s+- (id|name):/gm);
                 total += items ? items.length : 0;
