@@ -7,9 +7,13 @@
 # - Schema validation catches missing required fields
 # - Resource counting from contract YAML
 # - Output format matches expected structure
-# - Graceful degradation when iac-repo unreachable
-# - Status evaluation logic (ready, provisioning, blocked, unknown)
-# - gh CLI mocking using PATH-based mocking
+# - Status evaluation logic (ready, blocked, unknown)
+# - R23 endpoint response handling (200/401/403/404/5xx)
+#
+# Note: tests reproduce the action's inline shell logic in bats (the
+# established idiom in this file). They do not invoke action.yml directly.
+# A future refactor extracting steps to lib/*.sh would let bats run the
+# real shell — currently the YAML and tests can drift independently.
 # ──────────────────────────────────────────────────────────────────────────────
 
 setup() {
@@ -82,37 +86,6 @@ write_invalid_contract() {
   cat >"$TEST_TMPDIR/invalid.yaml" <<'YAML'
 region: us-east-1
 YAML
-}
-
-# ── Helper: Create mock gh CLI ────────────────────────────────────────────
-
-create_mock_gh() {
-  local behavior="${1:-success}"
-
-  cat >"$MOCK_BIN/gh" <<SCRIPT
-#!/usr/bin/env bash
-if [[ "\$1" == "repo" && "\$2" == "view" ]]; then
-  if [[ "$behavior" == "unreachable" ]]; then
-    echo "Could not resolve repository" >&2
-    exit 1
-  fi
-  echo '{"name":"healthcare-iac"}'
-  exit 0
-fi
-if [[ "\$1" == "issue" && "\$2" == "list" ]]; then
-  if [[ "$behavior" == "with-issues" ]]; then
-    echo '[{"number":42,"title":"contract-sync: tsc0 v2.1.2","url":"https://github.com/TheSmallCompany/healthcare-iac/issues/42"}]'
-  elif [[ "$behavior" == "no-issues" ]]; then
-    echo '[]'
-  else
-    echo '[]'
-  fi
-  exit 0
-fi
-echo "Mock gh: unhandled command: \$*" >&2
-exit 1
-SCRIPT
-  chmod +x "$MOCK_BIN/gh"
 }
 
 # ── Helper: Create node script for parsing ─────────────────────────────────
@@ -317,20 +290,6 @@ YAML
 
 # ── Graceful Degradation Tests ─────────────────────────────────────────────
 
-@test "graceful degradation: repo unreachable returns status unknown" {
-  create_mock_gh "unreachable"
-  write_valid_contract
-
-  IAC_REPO="TheSmallCompany/healthcare-iac"
-  REPO_ACCESSIBLE="false"
-
-  if ! gh repo view "$IAC_REPO" --json name > /dev/null 2>&1; then
-    REPO_ACCESSIBLE="false"
-  fi
-
-  [ "$REPO_ACCESSIBLE" = "false" ]
-}
-
 @test "graceful degradation: missing contract file does not crash" {
   CONTRACT_PATH="$TEST_TMPDIR/nonexistent.yaml"
 
@@ -341,106 +300,118 @@ YAML
   [ "$STATUS" = "blocked" ]
 }
 
-@test "graceful degradation: repo accessible with no issues returns ready" {
-  create_mock_gh "no-issues"
-  write_valid_contract
+# ── Status Evaluation Logic Tests (R23 endpoint flow) ─────────────────────
+# These tests reproduce the action's evaluate step's if/elif chain inline.
+# Variables match the new R23 flow: ENDPOINT_STATUS comes from steps.query-status,
+# CONTRACT_VALID from steps.parse, etc. (REPO_ACCESSIBLE / ISSUE_COUNT removed
+# in R23 — see action.yml step 3 "Query status endpoint".)
 
-  IAC_REPO="TheSmallCompany/healthcare-iac"
-
-  if gh repo view "$IAC_REPO" --json name > /dev/null 2>&1; then
-    REPO_ACCESSIBLE="true"
-  fi
-  [ "$REPO_ACCESSIBLE" = "true" ]
-
-  ISSUES_JSON=$(gh issue list --repo "$IAC_REPO" --label "contract-sync" --state open --search "tsc0" --json number,title,url --limit 20 2>/dev/null || echo "[]")
-  ISSUE_COUNT=$(echo "$ISSUES_JSON" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(Array.isArray(d) ? d.length : 0)")
-
-  [ "$ISSUE_COUNT" = "0" ]
-}
-
-@test "graceful degradation: repo accessible with open issues returns provisioning" {
-  create_mock_gh "with-issues"
-  write_valid_contract
-
-  IAC_REPO="TheSmallCompany/healthcare-iac"
-  ISSUES_JSON=$(gh issue list --repo "$IAC_REPO" --label "contract-sync" --state open --search "tsc0" --json number,title,url --limit 20 2>/dev/null || echo "[]")
-  ISSUE_COUNT=$(echo "$ISSUES_JSON" | node -e "const d=JSON.parse(require('fs').readFileSync('/dev/stdin','utf-8')); console.log(Array.isArray(d) ? d.length : 0)")
-
-  [ "$ISSUE_COUNT" = "1" ]
-}
-
-# ── Status Evaluation Logic Tests ─────────────────────────────────────────
-
-@test "status evaluation: blocked when contract invalid" {
-  CONTRACT_VALID="false"
-  REPO_ACCESSIBLE="true"
-  ISSUE_COUNT=0
-
-  if [[ "$CONTRACT_VALID" != "true" ]]; then
+eval_status() {
+  # Mirror of action.yml step 5 (Evaluate status). Inputs:
+  #   $1 = CONTRACT_VALID  (true|false)
+  #   $2 = ENDPOINT_STATUS (ready|blocked|unknown)
+  # Sets STATUS in caller scope.
+  local contract_valid="$1"
+  local endpoint_status="$2"
+  if [[ "$contract_valid" != "true" ]]; then
     STATUS="blocked"
-  elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
-    STATUS="unknown"
-  elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
-    STATUS="provisioning"
-  else
+  elif [[ "$endpoint_status" == "ready" ]]; then
     STATUS="ready"
+  elif [[ "$endpoint_status" == "blocked" ]]; then
+    STATUS="blocked"
+  else
+    STATUS="unknown"
   fi
+}
 
+@test "status evaluation: blocked when contract invalid (regardless of endpoint)" {
+  eval_status "false" "ready"
+  [ "$STATUS" = "blocked" ]
+
+  eval_status "false" "blocked"
+  [ "$STATUS" = "blocked" ]
+
+  eval_status "false" "unknown"
   [ "$STATUS" = "blocked" ]
 }
 
-@test "status evaluation: unknown when repo unreachable" {
-  CONTRACT_VALID="true"
-  REPO_ACCESSIBLE="false"
-  ISSUE_COUNT=0
+@test "status evaluation: ready when valid contract + endpoint=ready" {
+  eval_status "true" "ready"
+  [ "$STATUS" = "ready" ]
+}
 
-  if [[ "$CONTRACT_VALID" != "true" ]]; then
-    STATUS="blocked"
-  elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
-    STATUS="unknown"
-  elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
-    STATUS="provisioning"
-  else
-    STATUS="ready"
-  fi
+@test "status evaluation: blocked when valid contract + endpoint=blocked" {
+  eval_status "true" "blocked"
+  [ "$STATUS" = "blocked" ]
+}
 
+@test "status evaluation: unknown when valid contract + endpoint=unknown (fail-open)" {
+  eval_status "true" "unknown"
   [ "$STATUS" = "unknown" ]
 }
 
-@test "status evaluation: provisioning when open issues exist" {
-  CONTRACT_VALID="true"
-  REPO_ACCESSIBLE="true"
-  ISSUE_COUNT=2
-
-  if [[ "$CONTRACT_VALID" != "true" ]]; then
-    STATUS="blocked"
-  elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
-    STATUS="unknown"
-  elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
-    STATUS="provisioning"
-  else
-    STATUS="ready"
-  fi
-
-  [ "$STATUS" = "provisioning" ]
+@test "status evaluation: unknown when valid contract + endpoint=empty (e.g. JWT mint failed)" {
+  eval_status "true" ""
+  [ "$STATUS" = "unknown" ]
 }
 
-@test "status evaluation: ready when valid contract and no issues" {
-  CONTRACT_VALID="true"
-  REPO_ACCESSIBLE="true"
-  ISSUE_COUNT=0
-
-  if [[ "$CONTRACT_VALID" != "true" ]]; then
-    STATUS="blocked"
-  elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
-    STATUS="unknown"
-  elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
-    STATUS="provisioning"
-  else
-    STATUS="ready"
+# R23 endpoint response handling. Mirrors action.yml step 3 (Query status
+# endpoint) — given a synthesized HTTP response, asserts which output values
+# the step would write to GITHUB_OUTPUT. NOTE: this reproduces the if/elif
+# chain inline; it does not invoke the YAML step. See test-architecture
+# note in the README.
+@test "R23 endpoint: HTTP 200 with status=ready propagates" {
+  HTTP_CODE="200"
+  BODY='{"status":"ready","blocking_issues":[]}'
+  if [ "$HTTP_CODE" = "200" ]; then
+    STATUS=$(echo "$BODY" | jq -r '.status // "unknown"')
+    ISSUES=$(echo "$BODY" | jq -c '.blocking_issues // []')
   fi
-
   [ "$STATUS" = "ready" ]
+  [ "$ISSUES" = "[]" ]
+}
+
+@test "R23 endpoint: HTTP 200 with status=blocked propagates blocking_issues" {
+  HTTP_CODE="200"
+  BODY='{"status":"blocked","blocking_issues":["https://github.com/x/y/issues/1"]}'
+  if [ "$HTTP_CODE" = "200" ]; then
+    STATUS=$(echo "$BODY" | jq -r '.status // "unknown"')
+    ISSUES=$(echo "$BODY" | jq -c '.blocking_issues // []')
+  fi
+  [ "$STATUS" = "blocked" ]
+  [ "$ISSUES" = '["https://github.com/x/y/issues/1"]' ]
+}
+
+@test "R23 endpoint: HTTP 401 → status=blocked (denied)" {
+  HTTP_CODE="401"
+  if [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ]; then
+    STATUS="blocked"
+  fi
+  [ "$STATUS" = "blocked" ]
+}
+
+@test "R23 endpoint: HTTP 503 → status=unknown (fail-open)" {
+  HTTP_CODE="503"
+  if [ "$HTTP_CODE" = "200" ]; then
+    STATUS="ready"
+  elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ]; then
+    STATUS="blocked"
+  else
+    STATUS="unknown"
+  fi
+  [ "$STATUS" = "unknown" ]
+}
+
+@test "R23 endpoint: network failure (HTTP 000 from || echo) → status=unknown" {
+  HTTP_CODE="000"
+  if [ "$HTTP_CODE" = "200" ]; then
+    STATUS="ready"
+  elif [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "404" ]; then
+    STATUS="blocked"
+  else
+    STATUS="unknown"
+  fi
+  [ "$STATUS" = "unknown" ]
 }
 
 # ── Resource Counting Tests ──────────────────────────────────────────────

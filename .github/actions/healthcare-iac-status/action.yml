@@ -18,6 +18,7 @@ inputs:
     description: "Customer short code (e.g., tsc0)"
   contract-path:
     required: true
+    default: "infra-contract.yaml"
     description: "Path to infra-contract YAML (relative to repo root)"
   environment:
     required: true
@@ -25,13 +26,17 @@ inputs:
   iac-repo:
     required: false
     default: "TheSmallCompany/healthcare-iac"
-    description: "Healthcare-IAC repository (owner/repo)"
-  app-id:
+    description: >
+      [DEPRECATED — kept for backward compat] Iac repo coordinates.
+      R23 moved cross-repo lookups server-side; this input is ignored.
+  status-endpoint-url:
     required: false
-    description: "GitHub App ID for cross-repo authentication"
-  app-private-key:
-    required: false
-    description: "GitHub App private key (PEM) for cross-repo authentication"
+    default: "https://16jrm9z2m0.execute-api.us-east-1.amazonaws.com/status"
+    description: >
+      URL of the maintainer-side status endpoint (R23). Override only
+      for testing. Calls require a GitHub Actions OIDC JWT, which is
+      requested at runtime — the calling workflow must grant
+      `permissions: id-token: write`.
   # ── ADR-47 P6 / D9 — sleep-state read inputs ────────────────────────
   # Both optional so existing callers (no sleep-state interest) still
   # work; when omitted the `sleep-state` output is `unknown`.
@@ -50,7 +55,7 @@ inputs:
 
 outputs:
   status:
-    description: "ready | provisioning | partial | blocked | unknown"
+    description: "ready | blocked | unknown (R23: provisioning collapsed into blocked)"
     value: ${{ steps.evaluate.outputs.status }}
   contract-version:
     description: "Contract version validated"
@@ -204,61 +209,67 @@ runs:
 
         echo "total-resources=${DB_COUNT}" >> "$GITHUB_OUTPUT"
 
-    # ── Step 3: Generate GitHub App token (if credentials provided) ──
-    - name: Generate GitHub App token
-      id: app-token
-      if: inputs.app-id != '' && inputs.app-private-key != ''
-      shell: bash
-      run: |
-        set -euo pipefail
-
-        # Use GitHub's built-in method to generate installation token
-        # This step is intentionally simplified — in production, use
-        # actions/create-github-app-token@v1
-        echo "has-token=true" >> "$GITHUB_OUTPUT"
-        echo "::notice::GitHub App authentication configured for cross-repo access"
-
-    # ── Step 4: Query healthcare-iac for contract-sync issues ────────
-    - name: Query contract-sync issues
-      id: issues
+    # ── Step 3: Query the R23 status endpoint ────────────────────────
+    # Replaces the old "mint App token + gh issue list against private
+    # healthcare-iac" flow (ADR-47 R23 / F59). Calls a maintainer-owned
+    # HTTPS endpoint that performs the cross-repo lookup server-side
+    # using its own credentials. We authenticate by minting a GitHub
+    # Actions OIDC JWT — requires `permissions: id-token: write` in the
+    # caller workflow.
+    - name: Query status endpoint (R23)
+      id: query-status
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-        IAC_REPO: ${{ inputs.iac-repo }}
+        STATUS_URL: ${{ inputs.status-endpoint-url }}
         CUSTOMER_CODE: ${{ inputs.customer-code }}
       run: |
         set -euo pipefail
 
-        # Query for open contract-sync issues for this customer
-        ISSUES_JSON="[]"
-        ISSUE_COUNT=0
+        OWNER="${GITHUB_REPOSITORY_OWNER}"
+        REPO="${GITHUB_REPOSITORY##*/}"
+        AUD="https://github.com/TheSmallCompany/healthcare-iac"
 
-        if ! gh repo view "$IAC_REPO" --json name > /dev/null 2>&1; then
-          echo "::warning::Cannot access healthcare-iac repo ($IAC_REPO). Status will be 'unknown'."
-          echo "issues=$ISSUES_JSON" >> "$GITHUB_OUTPUT"
-          echo "issue-count=0" >> "$GITHUB_OUTPUT"
-          echo "repo-accessible=false" >> "$GITHUB_OUTPUT"
+        # Mint OIDC JWT
+        JWT_RESPONSE=$(curl -sSL \
+          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
+          "${ACTIONS_ID_TOKEN_REQUEST_URL:-}&audience=${AUD}" 2>/dev/null || echo "")
+        JWT=$(echo "${JWT_RESPONSE}" | jq -r '.value // empty' 2>/dev/null || echo "")
+        if [ -z "${JWT}" ]; then
+          echo "::warning::Failed to mint OIDC JWT (id-token: write missing on caller workflow?). Status will be 'unknown'."
+          echo "status=unknown" >> "${GITHUB_OUTPUT}"
+          echo "blocking-issues=[]" >> "${GITHUB_OUTPUT}"
           exit 0
         fi
 
-        echo "repo-accessible=true" >> "$GITHUB_OUTPUT"
+        # Call the status endpoint. Body to file, %{http_code} to stdout.
+        BODY_FILE=$(mktemp)
+        HTTP_CODE=$(curl -sSL \
+          -w "%{http_code}" \
+          -o "${BODY_FILE}" \
+          "${STATUS_URL}?customer_code=${CUSTOMER_CODE}&owner=${OWNER}&repo=${REPO}" \
+          -H "Authorization: Bearer ${JWT}" || echo "000")
+        BODY=$(cat "${BODY_FILE}")
+        rm -f "${BODY_FILE}"
 
-        # Search for open contract-sync issues matching this customer
-        ISSUES_JSON=$(gh issue list \
-          --repo "$IAC_REPO" \
-          --label "contract-sync" \
-          --state open \
-          --search "$CUSTOMER_CODE" \
-          --json number,title,url \
-          --limit 20 2>/dev/null || echo "[]")
+        echo "::notice::Status endpoint returned HTTP ${HTTP_CODE}"
 
-        ISSUE_COUNT=$(echo "$ISSUES_JSON" | node -e "
-          const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
-          console.log(Array.isArray(data) ? data.length : 0);
-        ")
-
-        echo "issues=${ISSUES_JSON}" >> "$GITHUB_OUTPUT"
-        echo "issue-count=${ISSUE_COUNT}" >> "$GITHUB_OUTPUT"
+        if [ "${HTTP_CODE}" = "200" ]; then
+          STATUS=$(echo "${BODY}" | jq -r '.status // "unknown"')
+          ISSUES=$(echo "${BODY}" | jq -c '.blocking_issues // []')
+          echo "status=${STATUS}" >> "${GITHUB_OUTPUT}"
+          echo "blocking-issues=${ISSUES}" >> "${GITHUB_OUTPUT}"
+        elif [ "${HTTP_CODE}" = "401" ] || [ "${HTTP_CODE}" = "403" ] || [ "${HTTP_CODE}" = "404" ]; then
+          REASON=$(echo "${BODY}" | jq -r '.reason // "no reason"' 2>/dev/null || echo "no reason")
+          echo "::error::Status endpoint denied request (HTTP ${HTTP_CODE}): ${REASON}"
+          echo "status=blocked" >> "${GITHUB_OUTPUT}"
+          echo "blocking-issues=[]" >> "${GITHUB_OUTPUT}"
+        else
+          # 5xx or network — fail-open to unknown so a transient endpoint
+          # outage doesn't take down every customer pipeline simultaneously.
+          echo "::warning::Status endpoint returned ${HTTP_CODE}. Fail-open to 'unknown'."
+          echo "status=unknown" >> "${GITHUB_OUTPUT}"
+          echo "blocking-issues=[]" >> "${GITHUB_OUTPUT}"
+        fi
 
     # ── Step 4.5: Configure AWS credentials for sleep-state read ─────
     # ADR-47 P6 / D9. Skipped when aws-role-arn is empty — that's the
@@ -296,6 +307,9 @@ runs:
         echo "sleep-state=$VALUE" >> "$GITHUB_OUTPUT"
 
     # ── Step 5: Evaluate overall status ──────────────────────────────
+    # Composes contract-validity (local) with endpoint-status (remote).
+    # Contract failures always win — a malformed contract blocks before
+    # we even ask the endpoint about it.
     - name: Evaluate status
       id: evaluate
       shell: bash
@@ -305,37 +319,33 @@ runs:
         CONTRACT_VALID="${{ steps.parse.outputs.contract-valid }}"
         PARSE_ERROR="${{ steps.parse.outputs.parse-error }}"
         TOTAL_RESOURCES="${{ steps.count.outputs.total-resources }}"
-        REPO_ACCESSIBLE="${{ steps.issues.outputs.repo-accessible }}"
-        ISSUE_COUNT="${{ steps.issues.outputs.issue-count }}"
-        ISSUES_JSON='${{ steps.issues.outputs.issues }}'
+        ENDPOINT_STATUS="${{ steps.query-status.outputs.status }}"
+        ENDPOINT_ISSUES='${{ steps.query-status.outputs.blocking-issues }}'
 
-        # Default values
         STATUS="unknown"
         RESOURCES_READY=0
         RESOURCES_PENDING=0
         BLOCKING_ISSUES="[]"
+        DETAILS="{}"
 
-        # Determine status
         if [[ "$CONTRACT_VALID" != "true" ]]; then
           STATUS="blocked"
           RESOURCES_PENDING="$TOTAL_RESOURCES"
           DETAILS="{\"error\":\"Contract validation failed\",\"parse_error\":\"${PARSE_ERROR}\"}"
-        elif [[ "$REPO_ACCESSIBLE" != "true" ]]; then
-          STATUS="unknown"
-          RESOURCES_PENDING="$TOTAL_RESOURCES"
-          DETAILS="{\"warning\":\"Cannot access IAC repo\",\"contract_valid\":true}"
-        elif [[ "$ISSUE_COUNT" -gt 0 ]]; then
-          STATUS="provisioning"
-          RESOURCES_PENDING="$TOTAL_RESOURCES"
-          BLOCKING_ISSUES=$(echo "$ISSUES_JSON" | node -e "
-            const data = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
-            console.log(JSON.stringify(data.map(i => i.url)));
-          " 2>/dev/null || echo "[]")
-          DETAILS="{\"contract_valid\":true,\"open_issues\":${ISSUE_COUNT},\"blocking_issues\":${BLOCKING_ISSUES}}"
-        else
+        elif [[ "$ENDPOINT_STATUS" == "ready" ]]; then
           STATUS="ready"
           RESOURCES_READY="$TOTAL_RESOURCES"
-          DETAILS="{\"contract_valid\":true,\"open_issues\":0,\"all_resources_assumed_ready\":true}"
+          DETAILS="{\"contract_valid\":true,\"endpoint_status\":\"ready\"}"
+        elif [[ "$ENDPOINT_STATUS" == "blocked" ]]; then
+          STATUS="blocked"
+          RESOURCES_PENDING="$TOTAL_RESOURCES"
+          BLOCKING_ISSUES="$ENDPOINT_ISSUES"
+          DETAILS="{\"contract_valid\":true,\"endpoint_status\":\"blocked\",\"blocking_issues\":${ENDPOINT_ISSUES}}"
+        else
+          # ENDPOINT_STATUS is "unknown" (or empty/unexpected) — fail-open
+          STATUS="unknown"
+          RESOURCES_PENDING="$TOTAL_RESOURCES"
+          DETAILS="{\"contract_valid\":true,\"endpoint_status\":\"${ENDPOINT_STATUS:-empty}\"}"
         fi
 
         echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
@@ -358,8 +368,6 @@ runs:
         # Status emoji
         case "$STATUS" in
           ready) EMOJI="✅" ;;
-          provisioning) EMOJI="🔄" ;;
-          partial) EMOJI="⚠️" ;;
           blocked) EMOJI="🚫" ;;
           *) EMOJI="❓" ;;
         esac
@@ -377,12 +385,12 @@ runs:
         | Status | **${STATUS}** |
         EOF
 
-        if [[ "$STATUS" == "provisioning" ]]; then
+        if [[ "$STATUS" == "blocked" ]]; then
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Blocking Issues" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo '${{ steps.evaluate.outputs.blocking-issues }}' | node -e "
             const issues = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf-8'));
-            issues.forEach(url => console.log('- ' + url));
+            if (Array.isArray(issues)) issues.forEach(url => console.log('- ' + url));
           " >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
         fi

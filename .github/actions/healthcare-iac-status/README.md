@@ -8,35 +8,35 @@ infrastructure provisioning status.
 
 ## Inputs
 
-| Input             | Required | Default                          | Description                                  |
-| ----------------- | -------- | -------------------------------- | -------------------------------------------- |
-| `customer-code`   | ✅       |                                  | Customer short code (e.g., `tsc0`)           |
-| `contract-path`   | ✅       |                                  | Path to infra-contract YAML                  |
-| `environment`     | ✅       |                                  | Target environment: `dev`, `staging`, `prod` |
-| `iac-repo`        |          | `TheSmallCompany/healthcare-iac` | Healthcare-IAC repository (owner/repo)       |
-| `app-id`          |          |                                  | GitHub App ID for cross-repo auth            |
-| `app-private-key` |          |                                  | GitHub App private key (PEM)                 |
+| Input                 | Required | Default                                                      | Description                                                                  |
+| --------------------- | -------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `customer-code`       | ✅       |                                                              | Customer short code (e.g., `tsc0`)                                           |
+| `contract-path`       | ✅       | `infra-contract.yaml`                                        | Path to infra-contract YAML                                                  |
+| `environment`         | ✅       |                                                              | Target environment: `dev`, `staging`, `prod`                                 |
+| `status-endpoint-url` |          | _maintainer-deployed status endpoint_                        | Override only for testing. Caller must grant `permissions: id-token: write`. |
+| `iac-repo`            |          | `TheSmallCompany/healthcare-iac`                             | _Deprecated; ignored since R23 (cross-repo lookups are server-side)._        |
+| `aws-role-arn`        |          | `""`                                                         | OIDC role ARN for sleep-state SSM read (P6/D9). Empty = skip.                |
+| `aws-region`          |          | `us-east-1`                                                  | AWS region for sleep-state read.                                             |
 
 ## Outputs
 
 | Output              | Description                       | Example                 |
 | ------------------- | --------------------------------- | ----------------------- |
-| `status`            | Overall readiness status          | `ready`, `provisioning` |
+| `status`            | Overall readiness status          | `ready`, `blocked`      |
 | `contract-version`  | Contract version being validated  | `2.1.2`                 |
 | `resources-ready`   | Count of provisioned resources    | `15`                    |
 | `resources-pending` | Count of pending resources        | `3`                     |
 | `blocking-issues`   | JSON array of blocking issue URLs | `["https://..."]`       |
 | `details`           | Full JSON validation details      | `{...}`                 |
+| `sleep-state`       | `awake` / `light-sleep` / `deep-sleep` / `unknown` | `awake` |
 
 ## Status Values
 
-| Status         | Meaning                                                  |
-| -------------- | -------------------------------------------------------- |
-| `ready`        | All contract resources are provisioned and available     |
-| `provisioning` | Open contract-sync issues exist; resources being created |
-| `partial`      | Some resources ready, some pending                       |
-| `blocked`      | Contract validation failed; cannot proceed               |
-| `unknown`      | Cannot determine status (repo unreachable, etc.)         |
+| Status    | Meaning                                                                                  |
+| --------- | ---------------------------------------------------------------------------------------- |
+| `ready`   | Contract is valid and the maintainer status endpoint reports the customer is ready       |
+| `blocked` | Contract failed validation, OR the endpoint reports blocking issues / denies the request |
+| `unknown` | Endpoint unreachable, OIDC mint failed, or transient 5xx (fail-open)                     |
 
 ## Usage
 
@@ -54,17 +54,22 @@ infrastructure provisioning status.
 
 ### Cross-Repo Usage (consumer repo → healthcare-iac)
 
+The caller workflow must grant `id-token: write` so the action can mint
+the OIDC JWT it sends to the maintainer status endpoint.
+
 ```yaml
-- name: Check infrastructure readiness
-  id: infra-check
-  uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/healthcare-iac-status@v1
-  with:
-    customer-code: tsc0
-    contract-path: infra-contracts/tsc0.yaml
-    environment: dev
-    iac-repo: TheSmallCompany/healthcare-iac
-    app-id: ${{ vars.CROSS_REPO_APP_ID }}
-    app-private-key: ${{ secrets.CROSS_REPO_APP_PRIVATE_KEY }}
+permissions:
+  contents: read
+  id-token: write   # required: action mints an OIDC JWT for the status endpoint
+
+steps:
+  - name: Check infrastructure readiness
+    id: infra-check
+    uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/healthcare-iac-status@v1
+    with:
+      customer-code: tsc0
+      contract-path: infra-contracts/tsc0.yaml
+      environment: dev
 ```
 
 ### Gate Deployment on Infrastructure Readiness
