@@ -1,0 +1,38 @@
+# assert-role-arn — Composite action.
+#
+# Pre-flight assertion for the AWS_ROLE_ARN_<ENV> repo variable. Used
+# by the reference consumer-pipeline template's three env jobs to fail
+# fast at the right step when the variable is missing or malformed,
+# instead of letting an empty value fall through to
+# configure-aws-credentials@v5's generic "Could not load credentials".
+#
+# F58 part 3.
+---
+name: "Assert role ARN"
+description: >
+  Pre-flight check that AWS_ROLE_ARN_<ENV> is set and looks like an
+  IAM role ARN. Fails the step with a workflow-local error naming the
+  variable + remediation location.
+
+inputs:
+  env:
+    required: true
+    description: "Target environment: dev | staging | prod"
+  role-arn:
+    required: true
+    description: >
+      The role-ARN value to assert. In a customer workflow this is
+      typically `${{ vars.AWS_ROLE_ARN_DEV }}` (or _STAGING / _PROD).
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+        ROLE_ARN: ${{ inputs.role-arn }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=lib/assert-role-arn.sh
+        source "${{ github.action_path }}/lib/assert-role-arn.sh"
+        assert_role_arn "$ENV" "$ROLE_ARN"

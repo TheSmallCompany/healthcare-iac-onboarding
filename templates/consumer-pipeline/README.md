@@ -43,6 +43,22 @@ the contract PR merges and the foundation stack provisions your roles.
 5. Push to `main` — first run should produce a green build, image push,
    and overlay-bump PR for `dev`.
 
+## Pre-flight diagnostics
+
+Each environment job in `build-and-promote.yml` runs a `Pre-flight: assert
+AWS_ROLE_ARN_<ENV> is set` step before `configure-aws-credentials@v5`. If
+you forget to set the corresponding repo variable (e.g., `AWS_ROLE_ARN_DEV`),
+the dev build job fails fast with a precise pointer:
+
+```
+::error::AWS_ROLE_ARN_DEV repo variable is empty. Set it under
+Settings → Secrets and variables → Actions → Variables → Repository
+variables. ARN format: arn:aws:iam::<account>:role/hiac-<customer>-dev-deploy
+```
+
+— instead of the cryptic `Could not load credentials from any providers`
+you'd otherwise see from the AWS SDK several steps later.
+
 ## What's NOT in these templates
 
 - **Application-specific build logic.** The `build-and-promote.yml`

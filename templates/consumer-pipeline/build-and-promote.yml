@@ -140,6 +140,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: "Pre-flight: assert AWS_ROLE_ARN_DEV is set"
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
+        with:
+          env: dev
+          role-arn: ${{ vars.AWS_ROLE_ARN_DEV }}
+
       - name: Configure AWS credentials (OIDC, dev)
         uses: aws-actions/configure-aws-credentials@v5
         with:
@@ -189,6 +195,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: "Pre-flight: assert AWS_ROLE_ARN_STAGING is set"
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
+        with:
+          env: staging
+          role-arn: ${{ vars.AWS_ROLE_ARN_STAGING }}
+
       - name: Configure AWS credentials (OIDC, staging)
         uses: aws-actions/configure-aws-credentials@v5
         with:
@@ -236,6 +248,12 @@ jobs:
     environment: prod # Environment reviewers gate this
     steps:
       - uses: actions/checkout@v6
+
+      - name: "Pre-flight: assert AWS_ROLE_ARN_PROD is set"
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
+        with:
+          env: prod
+          role-arn: ${{ vars.AWS_ROLE_ARN_PROD }}
 
       - name: Configure AWS credentials (OIDC, prod)
         uses: aws-actions/configure-aws-credentials@v5
