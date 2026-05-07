@@ -14,6 +14,7 @@ infrastructure provisioning status.
 | `contract-path`       | ✅       | `infra-contract.yaml`                                        | Path to infra-contract YAML                                                  |
 | `environment`         | ✅       |                                                              | Target environment: `dev`, `staging`, `prod`                                 |
 | `status-endpoint-url` |          | _maintainer-deployed status endpoint_                        | Override only for testing. Caller must grant `permissions: id-token: write`. |
+| `audience`            |          | `healthcare-iac-status`                                      | Audience claim minted into the OIDC JWT. Must match the platform endpoint's `EXPECTED_AUDIENCE`. Non-URL by design (GitHub OIDC rejects URL audiences that name foreign orgs — F73). |
 | `iac-repo`            |          | `TheSmallCompany/healthcare-iac`                             | _Deprecated; ignored since R23 (cross-repo lookups are server-side)._        |
 | `aws-role-arn`        |          | `""`                                                         | OIDC role ARN for sleep-state SSM read (P6/D9). Empty = skip.                |
 | `aws-region`          |          | `us-east-1`                                                  | AWS region for sleep-state read.                                             |

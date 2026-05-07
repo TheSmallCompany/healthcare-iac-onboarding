@@ -491,6 +491,55 @@ MOCK
   [[ "$output" == *"this is not json"* ]]
 }
 
+# F74-part-2 structural tests: pin that audience is action-input-driven,
+# not hardcoded. RED until action.yml declares the input + uses it.
+
+@test "F74-aud: action.yml declares inputs.audience with default 'healthcare-iac-status'" {
+  local default
+  default=$(python3 -c "
+import yaml,sys
+d = yaml.safe_load(open('.github/actions/healthcare-iac-status/action.yml'))
+print((d.get('inputs',{}).get('audience',{}) or {}).get('default',''))
+" 2>/dev/null)
+  [ "$default" = "healthcare-iac-status" ]
+}
+
+@test "F74-aud: action.yml step 3 run block references inputs.audience" {
+  # The Query status endpoint step must read the audience from the input,
+  # not bake it in. Tied to the same line block that sources mint-oidc-jwt.sh.
+  grep -q "inputs.audience" .github/actions/healthcare-iac-status/action.yml
+}
+
+@test "F74-aud: action.yml does NOT hardcode old URL-shaped audience value" {
+  # The pre-F74-part-2 audience was 'https://github.com/TheSmallCompany/healthcare-iac'.
+  # GitHub OIDC anti-impersonation rejects URL-shaped audiences naming an
+  # org the runner doesn't belong to. After this fix the only place that
+  # literal should appear is in comments / output descriptions referring
+  # to the iac repo by URL — never as an audience value.
+  ! grep -E '^[[:space:]]*AUD="?https://github\.com/TheSmallCompany/healthcare-iac' \
+      .github/actions/healthcare-iac-status/action.yml
+}
+
+# F74-part-2 functional regression: helper passes audience to GitHub OIDC URL.
+# Today this passes (helper already takes audience as $1) — included as a
+# regression pin so a future "helper signature change" can't silently break
+# audience propagation.
+
+@test "F74-aud: helper forwards arbitrary audience value to OIDC URL (regression pin)" {
+  source "$JWT_LIB"
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="https://example/?foo=bar"
+  # Synth body with a parseable JWT so the helper reaches the success path.
+  local h='eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'
+  local p='eyJleHAiOjE3MzU2ODk2MDB9'
+  local s='ZmFrZS1zaWc'
+  install_curl_mock "{\"value\":\"$h.$p.$s\"}" 200 0
+
+  run mint_oidc_jwt "literal-sentinel-aud-X"
+  [ "$status" -eq 0 ]
+  grep -q "audience=literal-sentinel-aud-X" "$TEST_TMPDIR/curl-calls.log"
+}
+
 @test "F74 JWT mint: happy path → JWT to stdout, ::add-mask:: + length + decoded exp on stderr" {
   source "$JWT_LIB"
   export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"

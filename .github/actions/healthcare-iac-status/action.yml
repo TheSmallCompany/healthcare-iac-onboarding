@@ -37,6 +37,16 @@ inputs:
       for testing. Calls require a GitHub Actions OIDC JWT, which is
       requested at runtime — the calling workflow must grant
       `permissions: id-token: write`.
+  audience:
+    required: false
+    default: "healthcare-iac-status"
+    description: >
+      Audience claim minted into the OIDC JWT and validated by the
+      status endpoint's EXPECTED_AUDIENCE. NON-URL BY DESIGN — GitHub
+      OIDC's anti-impersonation rule rejects URL-shaped audiences that
+      name a foreign org (cause of F73). Do not "fix" this back to a
+      URL. If you change it, change the endpoint's EXPECTED_AUDIENCE
+      to match.
   # ── ADR-47 P6 / D9 — sleep-state read inputs ────────────────────────
   # Both optional so existing callers (no sleep-state interest) still
   # work; when omitted the `sleep-state` output is `unknown`.
@@ -234,7 +244,7 @@ runs:
 
         OWNER="${GITHUB_REPOSITORY_OWNER}"
         REPO="${GITHUB_REPOSITORY##*/}"
-        AUD="https://github.com/TheSmallCompany/healthcare-iac"
+        AUD="${{ inputs.audience }}"
 
         # F74: mint via the helper. Exits 1 with diagnostic ::error::
         # if anything is wrong on the mint side.
