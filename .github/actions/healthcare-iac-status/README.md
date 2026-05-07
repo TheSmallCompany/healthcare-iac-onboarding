@@ -10,7 +10,7 @@ infrastructure provisioning status.
 
 | Input                 | Required | Default                                                      | Description                                                                  |
 | --------------------- | -------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| `customer-code`       | ✅       |                                                              | Customer short code (e.g., `tsc0`)                                           |
+| `customer-code`       | ✅       |                                                              | Customer code matching `^[a-z][a-z0-9]{2,11}$` (3–12 chars, lowercase letters/digits, must start with a letter). Validated at the action boundary; mismatched values fail with a specific error before any network call. |
 | `contract-path`       | ✅       | `infra-contract.yaml`                                        | Path to infra-contract YAML                                                  |
 | `environment`         | ✅       |                                                              | Target environment: `dev`, `staging`, `prod`                                 |
 | `status-endpoint-url` |          | _maintainer-deployed status endpoint_                        | Override only for testing. Caller must grant `permissions: id-token: write`. |

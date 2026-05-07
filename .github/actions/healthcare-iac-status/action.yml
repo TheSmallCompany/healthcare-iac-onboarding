@@ -93,7 +93,25 @@ outputs:
 runs:
   using: "composite"
   steps:
-    # ── Step 1: Parse contract YAML ──────────────────────────────────
+    # ── Step 1: Validate inputs ──────────────────────────────────────
+    # F58. customer-code must match infra-contracts' regex BEFORE we
+    # mint a JWT or build a status-endpoint URL. Without this, an
+    # unsubstituted Go template like '{{ .CustomerCode }}' (FI #3)
+    # silently became part of the URL, returned HTTP 000, and got
+    # blamed on "endpoint unreachable". Now it fails loud at the
+    # action boundary with the value + regex in the error message.
+    - name: Validate inputs
+      id: validate
+      shell: bash
+      env:
+        CUSTOMER_CODE: ${{ inputs.customer-code }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=lib/validate-customer-code.sh
+        source "${{ github.action_path }}/lib/validate-customer-code.sh"
+        validate_customer_code "$CUSTOMER_CODE"
+
+    # ── Step 2: Parse contract YAML ──────────────────────────────────
     - name: Parse contract YAML
       id: parse
       shell: bash
@@ -163,7 +181,7 @@ runs:
           echo "::warning::Contract customer '$CUSTOMER' does not match input customer-code '${{ inputs.customer-code }}'"
         fi
 
-    # ── Step 2: Count contract resources ─────────────────────────────
+    # ── Step 3: Count contract resources ─────────────────────────────
     - name: Count contract resources
       id: count
       shell: bash
@@ -219,7 +237,7 @@ runs:
 
         echo "total-resources=${DB_COUNT}" >> "$GITHUB_OUTPUT"
 
-    # ── Step 3: Query the R23 status endpoint ────────────────────────
+    # ── Step 4: Query the R23 status endpoint ────────────────────────
     # Replaces the old "mint App token + gh issue list against private
     # healthcare-iac" flow (ADR-47 R23 / F59). Calls a maintainer-owned
     # HTTPS endpoint that performs the cross-repo lookup server-side

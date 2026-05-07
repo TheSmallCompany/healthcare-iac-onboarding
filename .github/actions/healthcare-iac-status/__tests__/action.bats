@@ -540,6 +540,131 @@ print((d.get('inputs',{}).get('audience',{}) or {}).get('default',''))
   grep -q "audience=literal-sentinel-aud-X" "$TEST_TMPDIR/curl-calls.log"
 }
 
+# ── F58: customer-code boundary validation (lib/validate-customer-code.sh) ─
+# Validates customer-code against ^[a-z][a-z0-9]{2,11}$ before JWT mint
+# and URL construction. Catches FI #3 (unsubstituted Go template
+# '{{ .CustomerCode }}') and similar input-shape failures at the
+# boundary instead of letting them poison the URL → curl 000 →
+# fail-open-to-unknown chain that misleads operators.
+
+VAL_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/validate-customer-code.sh"
+
+# ── Failure modes ──────────────────────────────────────────────────────
+
+@test "F58 validate: empty input → exit 1 + 'customer-code is required'" {
+  source "$VAL_LIB"
+  run validate_customer_code ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"customer-code is required"* ]]
+}
+
+@test "F58 validate: contains whitespace → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo 01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"demo 01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: contains braces (FI #3 unsubstituted Go template) → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  local val='{{ .CustomerCode }}'
+  run validate_customer_code "$val"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$val"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: uppercase letters → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "Demo01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Demo01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: hyphen → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo-01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"demo-01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: underscore → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo_01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"demo_01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: period → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo.01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"demo.01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: slash → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo/01"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"demo/01"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: starts with digit → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "1demo"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"1demo"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: too short (2 chars) → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "ab"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ab"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+@test "F58 validate: too long (13 chars) → exit 1, names value, cites regex" {
+  source "$VAL_LIB"
+  run validate_customer_code "abcdefghijklm"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"abcdefghijklm"* ]]
+  [[ "$output" == *'^[a-z][a-z0-9]{2,11}$'* ]]
+}
+
+# ── Happy paths ────────────────────────────────────────────────────────
+
+@test "F58 validate: 'demo01' → exit 0 (typical customer code)" {
+  source "$VAL_LIB"
+  run validate_customer_code "demo01"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58 validate: 'tsc0' → exit 0" {
+  source "$VAL_LIB"
+  run validate_customer_code "tsc0"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58 validate: 'abc' → exit 0 (3-char lower bound)" {
+  source "$VAL_LIB"
+  run validate_customer_code "abc"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58 validate: 'abcdefghijkl' → exit 0 (12-char upper bound)" {
+  source "$VAL_LIB"
+  run validate_customer_code "abcdefghijkl"
+  [ "$status" -eq 0 ]
+}
+
 @test "F74 JWT mint: happy path → JWT to stdout, ::add-mask:: + length + decoded exp on stderr" {
   source "$JWT_LIB"
   export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
