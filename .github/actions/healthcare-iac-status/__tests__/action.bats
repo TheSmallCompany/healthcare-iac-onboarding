@@ -665,6 +665,263 @@ VAL_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/validate-custome
   [ "$status" -eq 0 ]
 }
 
+# ── F58-part-2: owner / repo / environment boundary validation ────────
+# Symmetric to F58 part 1. Each helper lives in its own lib/ file so
+# the action.yml Step 1 can compose them and a future "what does this
+# input expect" question has one obvious place to look.
+
+OWNER_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/validate-owner.sh"
+REPO_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/validate-repo.sh"
+ENV_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/validate-environment.sh"
+
+# ── Owner failure modes ───────────────────────────────────────────────
+
+@test "F58-aud owner: empty input → exit 1 + 'owner is required'" {
+  source "$OWNER_LIB"
+  run validate_owner ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"owner is required"* ]]
+}
+
+@test "F58-aud owner: contains whitespace → exit 1, names value, cites regex" {
+  source "$OWNER_LIB"
+  run validate_owner "hi ac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hi ac"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: leading hyphen → exit 1, cites regex (NOT a negation match)" {
+  source "$OWNER_LIB"
+  run validate_owner "-abc"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"-abc"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: trailing hyphen → exit 1 + 'cannot end with hyphen' (negation, not regex)" {
+  source "$OWNER_LIB"
+  run validate_owner "abc-"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"abc-"* ]]
+  [[ "$output" == *"cannot end with hyphen"* ]]
+}
+
+@test "F58-aud owner: consecutive hyphens → exit 1 + 'cannot contain consecutive hyphens' (negation, not regex)" {
+  source "$OWNER_LIB"
+  run validate_owner "ab--cd"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ab--cd"* ]]
+  [[ "$output" == *"cannot contain consecutive hyphens"* ]]
+}
+
+@test "F58-aud owner: period → exit 1, names value, cites regex" {
+  source "$OWNER_LIB"
+  run validate_owner "hi.ac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hi.ac"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: at-sign → exit 1, names value, cites regex" {
+  source "$OWNER_LIB"
+  run validate_owner "hi@ac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hi@ac"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: underscore → exit 1, names value, cites regex" {
+  source "$OWNER_LIB"
+  run validate_owner "hi_ac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hi_ac"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: slash → exit 1, names value, cites regex" {
+  source "$OWNER_LIB"
+  run validate_owner "hi/ac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"hi/ac"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+@test "F58-aud owner: too long (40 chars) → exit 1, cites regex" {
+  source "$OWNER_LIB"
+  local val="abcdefghijabcdefghijabcdefghijabcdefghij"  # 40 chars
+  run validate_owner "$val"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"$val"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$'* ]]
+}
+
+# ── Owner happy paths ─────────────────────────────────────────────────
+
+@test "F58-aud owner: 'hiac-demo' → exit 0" {
+  source "$OWNER_LIB"
+  run validate_owner "hiac-demo"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud owner: 'TheSmallCompany' → exit 0" {
+  source "$OWNER_LIB"
+  run validate_owner "TheSmallCompany"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud owner: 'a' → exit 0 (1-char lower bound)" {
+  source "$OWNER_LIB"
+  run validate_owner "a"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud owner: 39-char alphanumeric → exit 0 (max length boundary)" {
+  source "$OWNER_LIB"
+  local val="abcdefghijabcdefghijabcdefghijabcdefghi"  # 39 chars
+  run validate_owner "$val"
+  [ "$status" -eq 0 ]
+}
+
+# ── Repo failure modes ────────────────────────────────────────────────
+
+@test "F58-aud repo: empty input → exit 1 + 'repo is required'" {
+  source "$REPO_LIB"
+  run validate_repo ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"repo is required"* ]]
+}
+
+@test "F58-aud repo: contains whitespace → exit 1, names value, cites regex" {
+  source "$REPO_LIB"
+  run validate_repo "ab cd"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ab cd"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9._-]{1,100}$'* ]]
+}
+
+@test "F58-aud repo: '.' is reserved → exit 1 + 'reserved' (NOT regex mismatch)" {
+  source "$REPO_LIB"
+  run validate_repo "."
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reserved"* ]]
+  [[ "$output" == *"'.'"* ]]
+}
+
+@test "F58-aud repo: '..' is reserved → exit 1 + 'reserved' (NOT regex mismatch)" {
+  source "$REPO_LIB"
+  run validate_repo ".."
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"reserved"* ]]
+  [[ "$output" == *"'..'"* ]]
+}
+
+@test "F58-aud repo: slash → exit 1, names value, cites regex" {
+  source "$REPO_LIB"
+  run validate_repo "a/b"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"a/b"* ]]
+  [[ "$output" == *'^[a-zA-Z0-9._-]{1,100}$'* ]]
+}
+
+@test "F58-aud repo: too long (101 chars) → exit 1, cites regex" {
+  source "$REPO_LIB"
+  local val
+  val=$(printf 'a%.0s' $(seq 1 101))  # 101 'a's
+  run validate_repo "$val"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'^[a-zA-Z0-9._-]{1,100}$'* ]]
+}
+
+# ── Repo happy paths ──────────────────────────────────────────────────
+
+@test "F58-aud repo: 'healthcare-demo01' → exit 0" {
+  source "$REPO_LIB"
+  run validate_repo "healthcare-demo01"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud repo: 'healthcare.platform' → exit 0 (period legal)" {
+  source "$REPO_LIB"
+  run validate_repo "healthcare.platform"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud repo: 'a' → exit 0 (1-char lower bound)" {
+  source "$REPO_LIB"
+  run validate_repo "a"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud repo: 100-char string → exit 0 (max length boundary)" {
+  source "$REPO_LIB"
+  local val
+  val=$(printf 'a%.0s' $(seq 1 100))  # 100 'a's
+  run validate_repo "$val"
+  [ "$status" -eq 0 ]
+}
+
+# ── Environment failure modes ─────────────────────────────────────────
+
+@test "F58-aud env: empty input → exit 1 + 'environment is required'" {
+  source "$ENV_LIB"
+  run validate_environment ""
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"environment is required"* ]]
+}
+
+@test "F58-aud env: 'production' (close-but-no) → exit 1, names value, cites allowlist" {
+  source "$ENV_LIB"
+  run validate_environment "production"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"'production'"* ]]
+  [[ "$output" == *"dev|staging|prod"* ]]
+}
+
+@test "F58-aud env: 'DEV' (case-sensitive) → exit 1, names value, cites allowlist" {
+  source "$ENV_LIB"
+  run validate_environment "DEV"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"'DEV'"* ]]
+  [[ "$output" == *"dev|staging|prod"* ]]
+}
+
+@test "F58-aud env: 'test' → exit 1, names value, cites allowlist" {
+  source "$ENV_LIB"
+  run validate_environment "test"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"'test'"* ]]
+  [[ "$output" == *"dev|staging|prod"* ]]
+}
+
+@test "F58-aud env: ' dev' (leading whitespace) → exit 1, names value, cites allowlist" {
+  source "$ENV_LIB"
+  run validate_environment " dev"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *" dev"* ]]
+  [[ "$output" == *"dev|staging|prod"* ]]
+}
+
+# ── Environment happy paths ───────────────────────────────────────────
+
+@test "F58-aud env: 'dev' → exit 0" {
+  source "$ENV_LIB"
+  run validate_environment "dev"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud env: 'staging' → exit 0" {
+  source "$ENV_LIB"
+  run validate_environment "staging"
+  [ "$status" -eq 0 ]
+}
+
+@test "F58-aud env: 'prod' → exit 0" {
+  source "$ENV_LIB"
+  run validate_environment "prod"
+  [ "$status" -eq 0 ]
+}
+
 @test "F74 JWT mint: happy path → JWT to stdout, ::add-mask:: + length + decoded exp on stderr" {
   source "$JWT_LIB"
   export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"

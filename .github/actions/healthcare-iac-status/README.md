@@ -12,12 +12,21 @@ infrastructure provisioning status.
 | --------------------- | -------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
 | `customer-code`       | ✅       |                                                              | Customer code matching `^[a-z][a-z0-9]{2,11}$` (3–12 chars, lowercase letters/digits, must start with a letter). Validated at the action boundary; mismatched values fail with a specific error before any network call. |
 | `contract-path`       | ✅       | `infra-contract.yaml`                                        | Path to infra-contract YAML                                                  |
-| `environment`         | ✅       |                                                              | Target environment: `dev`, `staging`, `prod`                                 |
+| `environment`         | ✅       |                                                              | Target environment: strict allowlist `dev` \| `staging` \| `prod` (case-sensitive). Validated at the action boundary. |
 | `status-endpoint-url` |          | _maintainer-deployed status endpoint_                        | Override only for testing. Caller must grant `permissions: id-token: write`. |
 | `audience`            |          | `healthcare-iac-status`                                      | Audience claim minted into the OIDC JWT. Must match the platform endpoint's `EXPECTED_AUDIENCE`. Non-URL by design (GitHub OIDC rejects URL audiences that name foreign orgs — F73). |
 | `iac-repo`            |          | `TheSmallCompany/healthcare-iac`                             | _Deprecated; ignored since R23 (cross-repo lookups are server-side)._        |
 | `aws-role-arn`        |          | `""`                                                         | OIDC role ARN for sleep-state SSM read (P6/D9). Empty = skip.                |
 | `aws-region`          |          | `us-east-1`                                                  | AWS region for sleep-state read.                                             |
+
+## Validated runtime context
+
+Two values are **derived** from the runtime workflow context (not configurable as inputs) and are validated at the action boundary alongside the inputs above. A failure here typically means the action ran in an unexpected context — a rare condition, but the diagnostic is precise so you can tell.
+
+| Value   | Source                     | Constraint                                                                                     |
+| ------- | -------------------------- | ---------------------------------------------------------------------------------------------- |
+| `owner` | `GITHUB_REPOSITORY_OWNER`  | `^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}$`, plus no consecutive hyphens and no trailing hyphen.        |
+| `repo`  | `GITHUB_REPOSITORY` (suffix after `/`) | `^[a-zA-Z0-9._-]{1,100}$`, plus `.` and `..` rejected (reserved by GitHub).        |
 
 ## Outputs
 
