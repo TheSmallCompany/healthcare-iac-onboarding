@@ -20,9 +20,16 @@ inputs:
     description: "Target environment: dev | staging | prod"
   role-arn:
     required: true
+    # NOTE: avoid ${{ ... }} syntax in description fields — the runner
+    # evaluates expressions even in metadata and rejects context refs
+    # not valid in composite-action scope (e.g., vars.*, secrets.*).
+    # Surfaced during F58-pt3 rollout; see issue #3 for the broader
+    # manifest-lint kaizen.
     description: >
-      The role-ARN value to assert. In a customer workflow this is
-      typically `${{ vars.AWS_ROLE_ARN_DEV }}` (or _STAGING / _PROD).
+      The role-ARN value to assert. In a customer workflow the caller
+      typically passes the corresponding repo variable for the target
+      environment — e.g., the value of `vars.AWS_ROLE_ARN_DEV` for `dev`,
+      `vars.AWS_ROLE_ARN_STAGING` for `staging`, etc.
 
 runs:
   using: "composite"

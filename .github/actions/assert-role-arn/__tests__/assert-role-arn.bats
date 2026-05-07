@@ -9,6 +9,24 @@
 # ──────────────────────────────────────────────────────────────────────
 
 LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/assert-role-arn.sh"
+ACTION_YML="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/action.yml"
+
+# ── Manifest-content regression (F58-pt3 hot-fix) ────────────────────
+# Empirical correction: GitHub Actions runner DOES evaluate ${{ ... }}
+# expressions inside composite-action manifest description fields, and
+# rejects context refs not valid in composite scope (vars.*, secrets.*,
+# needs.*). A description string with `${{ vars.AWS_ROLE_ARN_DEV }}` —
+# meant as documentation — bricked the action's load.
+#
+# This test is a poor-man's, single-file manifest-context lint pinning
+# the F58-pt3 fix specifically. The whole-repo manifest-lint kaizen is
+# tracked separately as issue #3; that's where the real
+# context-availability check will live. Until then, this regression
+# catches the same class for THIS file.
+
+@test "F58-pt3 manifest-lint: action.yml contains no GitHub-Actions expressions referencing vars.* (runner evaluates them in description fields too)" {
+  ! grep -E '\$\{\{[^}]*vars\.' "$ACTION_YML"
+}
 
 # ── Failure modes ────────────────────────────────────────────────────
 
