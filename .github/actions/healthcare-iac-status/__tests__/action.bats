@@ -9,11 +9,15 @@
 # - Output format matches expected structure
 # - Status evaluation logic (ready, blocked, unknown)
 # - R23 endpoint response handling (200/401/403/404/5xx)
+# - F74 OIDC JWT mint (lib/mint-oidc-jwt.sh) — the one piece that *is*
+#   tested via real shell, sourced from the helper that action.yml also
+#   sources. Same pattern as read-sleep-state.bats.
 #
-# Note: tests reproduce the action's inline shell logic in bats (the
-# established idiom in this file). They do not invoke action.yml directly.
-# A future refactor extracting steps to lib/*.sh would let bats run the
-# real shell — currently the YAML and tests can drift independently.
+# Note: most tests reproduce the action's inline shell logic in bats
+# (the established idiom in this file) and do not invoke action.yml
+# directly. F74 introduced the lib/ extraction pattern for the JWT mint;
+# a future refactor extending that to status-evaluate would let all
+# tests run the real shell.
 # ──────────────────────────────────────────────────────────────────────────────
 
 setup() {
@@ -412,6 +416,109 @@ eval_status() {
     STATUS="unknown"
   fi
   [ "$STATUS" = "unknown" ]
+}
+
+# ── F74: OIDC JWT mint helper (lib/mint-oidc-jwt.sh) ─────────────────────
+# Real-shell tests against the extracted helper. Five failure modes the
+# action's old inline curl block silently swallowed; each one now produces
+# a distinct error message we can read in CI logs.
+
+JWT_LIB="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/lib/mint-oidc-jwt.sh"
+
+# Install a curl mock that emits a configurable body and HTTP code.
+#   $1 = body to write to stdout (may be empty)
+#   $2 = HTTP code to append after a newline when curl is invoked with -w '%{http_code}' (default 200)
+#   $3 = curl exit code (default 0)
+install_curl_mock() {
+  local body="$1" code="${2:-200}" rc="${3:-0}"
+  printf '%s' "$body" > "$TEST_TMPDIR/curl-body"
+  cat > "$MOCK_BIN/curl" <<MOCK
+#!/usr/bin/env bash
+echo "curl \$*" >> "$TEST_TMPDIR/curl-calls.log"
+WANTS_CODE=0
+for a in "\$@"; do
+  case "\$a" in
+    *%{http_code}*) WANTS_CODE=1 ;;
+  esac
+done
+cat "$TEST_TMPDIR/curl-body"
+if [[ \$WANTS_CODE -eq 1 ]]; then printf '\n%s' '$code'; fi
+exit $rc
+MOCK
+  chmod +x "$MOCK_BIN/curl"
+}
+
+@test "F74 JWT mint: env vars missing → exit non-zero, names the missing var, hints id-token: write" {
+  source "$JWT_LIB"
+  unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
+  run mint_oidc_jwt "https://github.com/TheSmallCompany/healthcare-iac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"ACTIONS_ID_TOKEN_REQUEST_TOKEN"* ]]
+  [[ "$output" == *"not set"* ]]
+  [[ "$output" == *"id-token: write"* ]]
+}
+
+@test "F74 JWT mint: curl network failure (rc=6) → exit non-zero, names the rc" {
+  source "$JWT_LIB"
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="https://example.invalid/?foo=bar"
+  install_curl_mock "" 0 6
+  run mint_oidc_jwt "https://github.com/TheSmallCompany/healthcare-iac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"curl failed to reach GitHub OIDC endpoint"* ]]
+  [[ "$output" == *"6"* ]]
+}
+
+@test "F74 JWT mint: HTTP 401 from GitHub OIDC → exit non-zero, names status, includes body snippet" {
+  source "$JWT_LIB"
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="https://example/?foo=bar"
+  install_curl_mock '{"message":"Bad credentials"}' 401 0
+  run mint_oidc_jwt "https://github.com/TheSmallCompany/healthcare-iac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"GitHub OIDC returned HTTP 401"* ]]
+  [[ "$output" == *"Bad credentials"* ]]
+}
+
+@test "F74 JWT mint: HTTP 200 with non-JSON body → exit non-zero, names the parse failure, snippet" {
+  source "$JWT_LIB"
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="https://example/?foo=bar"
+  install_curl_mock 'this is not json at all' 200 0
+  run mint_oidc_jwt "https://github.com/TheSmallCompany/healthcare-iac"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"OIDC response was not JSON"* ]]
+  [[ "$output" == *"this is not json"* ]]
+}
+
+@test "F74 JWT mint: happy path → JWT to stdout, ::add-mask:: + length + decoded exp on stderr" {
+  source "$JWT_LIB"
+  export ACTIONS_ID_TOKEN_REQUEST_TOKEN="dummy-bearer"
+  export ACTIONS_ID_TOKEN_REQUEST_URL="https://example/?foo=bar"
+  # Synthesize a JWT: header.payload.sig with payload {"exp":1735689600}.
+  # 1735689600 is 2025-01-01T00:00:00Z — picked as a fixed, recognizable
+  # past timestamp so an assertion mismatch on exp shows up as the wrong
+  # number rather than an off-by-one or "current time" surprise.
+  local h='eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9'   # {"alg":"RS256","typ":"JWT"}
+  local p='eyJleHAiOjE3MzU2ODk2MDB9'               # {"exp":1735689600}
+  local s='ZmFrZS1zaWc'                            # base64url("fake-sig")
+  local jwt="$h.$p.$s"
+  install_curl_mock "{\"value\":\"$jwt\",\"count\":1}" 200 0
+
+  local err_file
+  err_file=$(mktemp)
+  local stdout
+  stdout=$(mint_oidc_jwt "https://github.com/TheSmallCompany/healthcare-iac" 2>"$err_file")
+  local rc=$?
+  local stderr
+  stderr=$(cat "$err_file")
+  rm -f "$err_file"
+
+  [ "$rc" -eq 0 ]
+  [ "$stdout" = "$jwt" ]
+  [[ "$stderr" == *"::add-mask::$jwt"* ]]
+  [[ "$stderr" == *"length=${#jwt}"* ]]
+  [[ "$stderr" == *"exp=1735689600"* ]]
 }
 
 # ── Resource Counting Tests ──────────────────────────────────────────────

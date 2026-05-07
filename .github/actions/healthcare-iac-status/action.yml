@@ -216,6 +216,13 @@ runs:
     # using its own credentials. We authenticate by minting a GitHub
     # Actions OIDC JWT — requires `permissions: id-token: write` in the
     # caller workflow.
+    #
+    # F74: JWT mint is delegated to lib/mint-oidc-jwt.sh, which exits
+    # non-zero with a specific ::error:: line for each of four failure
+    # modes (env-vars missing, curl network fail, non-200 from GitHub
+    # OIDC, response not JSON). `set -e` propagates that exit so the
+    # step fails loud — no more silent "Status will be 'unknown'" when
+    # the real cause is a missing id-token: write permission.
     - name: Query status endpoint (R23)
       id: query-status
       shell: bash
@@ -229,17 +236,11 @@ runs:
         REPO="${GITHUB_REPOSITORY##*/}"
         AUD="https://github.com/TheSmallCompany/healthcare-iac"
 
-        # Mint OIDC JWT
-        JWT_RESPONSE=$(curl -sSL \
-          -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" \
-          "${ACTIONS_ID_TOKEN_REQUEST_URL:-}&audience=${AUD}" 2>/dev/null || echo "")
-        JWT=$(echo "${JWT_RESPONSE}" | jq -r '.value // empty' 2>/dev/null || echo "")
-        if [ -z "${JWT}" ]; then
-          echo "::warning::Failed to mint OIDC JWT (id-token: write missing on caller workflow?). Status will be 'unknown'."
-          echo "status=unknown" >> "${GITHUB_OUTPUT}"
-          echo "blocking-issues=[]" >> "${GITHUB_OUTPUT}"
-          exit 0
-        fi
+        # F74: mint via the helper. Exits 1 with diagnostic ::error::
+        # if anything is wrong on the mint side.
+        # shellcheck source=lib/mint-oidc-jwt.sh
+        source "${{ github.action_path }}/lib/mint-oidc-jwt.sh"
+        JWT=$(mint_oidc_jwt "$AUD")
 
         # Call the status endpoint. Body to file, %{http_code} to stdout.
         BODY_FILE=$(mktemp)
