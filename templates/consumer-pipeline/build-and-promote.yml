@@ -148,7 +148,7 @@ jobs:
 
       - name: Login to ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image
         run: |
@@ -198,7 +198,7 @@ jobs:
 
       - name: Login to ECR (staging)
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image (staging)
         run: |
@@ -246,7 +246,7 @@ jobs:
 
       - name: Login to ECR (prod)
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image (prod)
         run: |

@@ -1,0 +1,78 @@
+# Lint customer-facing workflow templates (F-ecr-login-pin / kaizen).
+#
+# Two jobs:
+#   actionlint     — static lint for syntax/expression/step-ref/typos
+#                    (rhysd/actionlint). Doesn't validate that
+#                    `uses: owner/repo@ref` resolves over the network —
+#                    that's resolve-pins' job.
+#   resolve-pins   — for each `uses:` in templates/, calls the GitHub API
+#                    to confirm the ref exists as a tag, branch, or
+#                    commit. Catches the F-ecr-login class (template
+#                    ships pinning a non-existent version).
+name: Lint templates
+
+on:
+  pull_request:
+    paths:
+      - 'templates/**'
+      - '.github/workflows/lint-templates.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'templates/**'
+      - '.github/workflows/lint-templates.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install actionlint
+        run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.12
+      - name: Run actionlint on templates
+        run: ./actionlint -no-color -oneline templates/consumer-pipeline/*.yml
+
+  resolve-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify each `uses:` in templates/ resolves
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          fail=0
+          checked=0
+          while IFS= read -r raw; do
+            file="${raw%%:*}"
+            rest="${raw#*:}"
+            line="${rest%%:*}"
+            text="${rest#*:}"
+            ref=$(echo "$text" | sed -nE 's/[[:space:]]*-?[[:space:]]*uses:[[:space:]]*([^[:space:]#]+).*/\1/p')
+            [ -z "$ref" ] && continue
+            # Skip local actions (./..., ../...) — resolved at runtime by checkout state.
+            case "$ref" in
+              .*) continue ;;
+              # Skip our own published action — don't gate ourselves.
+              TheSmallCompany/healthcare-iac-onboarding/*) continue ;;
+            esac
+            checked=$((checked + 1))
+            owner_repo="${ref%@*}"
+            rev="${ref#*@}"
+            if gh api "repos/$owner_repo/git/refs/tags/$rev" >/dev/null 2>&1; then
+              echo "OK   tag    $ref ($file:$line)"
+            elif gh api "repos/$owner_repo/git/refs/heads/$rev" >/dev/null 2>&1; then
+              echo "OK   branch $ref ($file:$line)"
+            elif gh api "repos/$owner_repo/commits/$rev" >/dev/null 2>&1; then
+              echo "OK   commit $ref ($file:$line)"
+            else
+              echo "FAIL ref does not resolve: $ref ($file:$line)"
+              fail=1
+            fi
+          done < <(grep -rn -E '^[[:space:]]*-?[[:space:]]*uses:' templates/ --include='*.yml' --include='*.yaml' --include='*.example' || true)
+          echo "---"
+          echo "Checked $checked ref(s) across templates/"
+          exit $fail
