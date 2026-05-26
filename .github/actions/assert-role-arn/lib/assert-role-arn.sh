@@ -28,7 +28,7 @@ assert_role_arn() {
   trimmed=$(echo "$role_arn" | tr -d '[:space:]')
 
   if [[ -z "$trimmed" ]]; then
-    echo "::error::${var_name} repo variable is empty. Set it under Settings → Secrets and variables → Actions → Variables → Repository variables. ARN format: arn:aws:iam::<account>:role/hiac-<customer>-${env}-deploy" >&2
+    echo "::error::${var_name} repo variable is empty. Set it under Settings → Secrets and variables → Actions → Variables → Repository variables. ARN format: arn:aws:iam::<account>:role/hiac-<customer>-${env}-github-actions" >&2
     return 1
   fi
 

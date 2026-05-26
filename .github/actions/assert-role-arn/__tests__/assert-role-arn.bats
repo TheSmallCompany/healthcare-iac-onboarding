@@ -36,7 +36,12 @@ ACTION_YML="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/action.yml"
   [ "$status" -ne 0 ]
   [[ "$output" == *"AWS_ROLE_ARN_DEV repo variable is empty"* ]]
   [[ "$output" == *"Settings → Secrets and variables → Actions → Variables → Repository variables"* ]]
-  [[ "$output" == *'arn:aws:iam::<account>:role/hiac-<customer>-dev-deploy'* ]]
+  # ADR-056 M7 retro (hiac-demo#6): the format-hint literal previously
+  # read 'hiac-<customer>-dev-deploy', but the actual platform role
+  # suffix is '-github-actions'. The wrong suffix made every
+  # assert-role-arn failure a wild goose chase. Pin the corrected
+  # literal so the documentation matches reality.
+  [[ "$output" == *'arn:aws:iam::<account>:role/hiac-<customer>-dev-github-actions'* ]]
 }
 
 @test "F58-pt3 assert: whitespace-only role-arn (env=staging) → exit 1 + AWS_ROLE_ARN_STAGING-named empty error" {
@@ -45,7 +50,22 @@ ACTION_YML="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/action.yml"
   [ "$status" -ne 0 ]
   [[ "$output" == *"AWS_ROLE_ARN_STAGING repo variable is empty"* ]]
   [[ "$output" == *"Settings → Secrets and variables → Actions → Variables → Repository variables"* ]]
-  [[ "$output" == *'arn:aws:iam::<account>:role/hiac-<customer>-staging-deploy'* ]]
+  [[ "$output" == *'arn:aws:iam::<account>:role/hiac-<customer>-staging-github-actions'* ]]
+}
+
+# Belt-and-suspenders regression guard against the wrong-suffix literal
+# reappearing. ADR-056 M7 retro found this had been wrong since the
+# module was introduced and was a recurring source of confusion. The
+# guard catches anyone who tries to "revert to legacy" without thinking
+# it through.
+@test "F58-pt3 assert: error message MUST NOT use the legacy '-deploy' suffix (ADR-056 M7 retro)" {
+  source "$LIB"
+  run assert_role_arn "dev" ""
+  if [[ "$output" == *"-deploy"* ]]; then
+    echo "Error message references the legacy '-deploy' suffix." >&2
+    echo "Platform roles use '-github-actions'." >&2
+    return 1
+  fi
 }
 
 @test "F58-pt3 assert: non-ARN string (env=prod) → exit 1 + format-hint error (DISTINCT from empty)" {
