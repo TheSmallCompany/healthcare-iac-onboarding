@@ -4,7 +4,7 @@
 # by the reference consumer-pipeline template's three env jobs to fail
 # fast at the right step when the variable is missing or malformed,
 # instead of letting an empty value fall through to
-# configure-aws-credentials@v5's generic "Could not load credentials".
+# configure-aws-credentials@v6's generic "Could not load credentials".
 #
 # F58 part 3.
 ---
