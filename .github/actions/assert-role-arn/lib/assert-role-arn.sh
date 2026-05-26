@@ -6,7 +6,7 @@
 # template's three env jobs to fail fast at the right step with a
 # workflow-local error naming the variable + remediation location,
 # instead of letting an empty value fall through to
-# configure-aws-credentials@v5's generic "Could not load credentials".
+# configure-aws-credentials@v6's generic "Could not load credentials".
 #
 # Inputs (positional):
 #   $1 — env (dev|staging|prod)

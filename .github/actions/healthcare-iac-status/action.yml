@@ -327,7 +327,7 @@ runs:
     - name: Configure AWS credentials for sleep-state
       id: aws-creds
       if: ${{ inputs.aws-role-arn != '' }}
-      uses: aws-actions/configure-aws-credentials@v5
+      uses: aws-actions/configure-aws-credentials@v6
       with:
         role-to-assume: ${{ inputs.aws-role-arn }}
         aws-region: ${{ inputs.aws-region }}

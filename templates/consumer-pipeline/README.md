@@ -46,7 +46,7 @@ the contract PR merges and the foundation stack provisions your roles.
 ## Pre-flight diagnostics
 
 Each environment job in `build-and-promote.yml` runs a `Pre-flight: assert
-AWS_ROLE_ARN_<ENV> is set` step before `configure-aws-credentials@v5`. If
+AWS_ROLE_ARN_<ENV> is set` step before `configure-aws-credentials@v6`. If
 you forget to set the corresponding repo variable (e.g., `AWS_ROLE_ARN_DEV`),
 the dev build job fails fast with a precise pointer:
 

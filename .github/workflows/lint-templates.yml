@@ -76,3 +76,37 @@ jobs:
           echo "---"
           echo "Checked $checked ref(s) across templates/"
           exit $fail
+
+      # Strict-version pin verification — for actions where staying on
+      # the published-major matters (Node 20 deprecation, security
+      # advisories, breaking-change cadence), pin the EXACT major and
+      # fail the lint if the template drifts behind.
+      #
+      # Currently enforced:
+      #   aws-actions/configure-aws-credentials@v6
+      #     — v5 hits Node 16 deprecation (deadline 2026-09-16).
+      #     Customer pipelines copying the template should land on
+      #     a Node 20-supported version from day one.
+      - name: Strict-version pin verification
+        run: |
+          set -euo pipefail
+          fail=0
+          # action_name | required_pin | rationale
+          declare -a ENFORCED=(
+            "aws-actions/configure-aws-credentials|@v6|Node 20 deprecation; v5 expires 2026-09-16"
+          )
+          for entry in "${ENFORCED[@]}"; do
+            IFS='|' read -r action required reason <<< "$entry"
+            while IFS= read -r line; do
+              # Extract just the @ref from a uses: line that mentions this action
+              ref=$(echo "$line" | sed -nE "s|.*uses:[[:space:]]*${action}(@[^[:space:]#]+).*|\1|p")
+              [ -z "$ref" ] && continue
+              if [ "$ref" != "$required" ]; then
+                echo "FAIL ${action}${ref} must be ${action}${required} (${reason})"
+                fail=1
+              else
+                echo "OK   ${action}${ref}"
+              fi
+            done < <(grep -rn -E "uses:[[:space:]]*${action}@" templates/ --include='*.yml' --include='*.yaml' --include='*.example' || true)
+          done
+          exit $fail
