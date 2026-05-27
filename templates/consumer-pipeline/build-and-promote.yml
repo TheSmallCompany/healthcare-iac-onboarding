@@ -52,6 +52,13 @@ jobs:
   # Status gate — only build if healthcare-iac says "ready"
   # ───────────────────────────────────────────────────────────────────
   status:
+    # ADR-056 M7 / D1 (healthcare-iac#1288): env-scoped vars.AWS_ROLE_ARN
+    # replaces the legacy _<ENV> suffix convention. The status job runs
+    # ahead of env promotion and needs SOME OIDC role for the sleep-state
+    # SSM read; the dev role works fine (SSM param is env-agnostic, role
+    # just needs SSM read permission). Job-level `environment: dev` is
+    # the minimum required for `vars.AWS_ROLE_ARN` to resolve here.
+    environment: dev
     runs-on: ubuntu-latest
     outputs:
       status: ${{ steps.check.outputs.status }}
@@ -65,7 +72,7 @@ jobs:
           customer-code: "{{ .CustomerCode }}"
           contract-path: "infra-contract.yaml"
           environment: "dev"
-          aws-role-arn: ${{ vars.AWS_ROLE_ARN_DEV }}
+          aws-role-arn: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Fail closed if not ready
@@ -140,16 +147,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: "Pre-flight: assert AWS_ROLE_ARN_DEV is set"
-        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
-        with:
-          env: dev
-          role-arn: ${{ vars.AWS_ROLE_ARN_DEV }}
-
       - name: Configure AWS credentials (OIDC, dev)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN_DEV }}
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to ECR
@@ -195,17 +196,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: "Pre-flight: assert AWS_ROLE_ARN_STAGING is set"
-        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
-        with:
-          env: staging
-          role-arn: ${{ vars.AWS_ROLE_ARN_STAGING }}
-
       - name: Configure AWS credentials (OIDC, staging)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # Variable scoped to the staging Environment — defense in depth.
-          role-to-assume: ${{ vars.AWS_ROLE_ARN_STAGING }}
+          # Variable env-scoped to the staging Environment — only this
+          # job (which declares `environment: staging`) can read it.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to ECR (staging)
@@ -249,17 +245,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: "Pre-flight: assert AWS_ROLE_ARN_PROD is set"
-        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/assert-role-arn@main
-        with:
-          env: prod
-          role-arn: ${{ vars.AWS_ROLE_ARN_PROD }}
-
       - name: Configure AWS credentials (OIDC, prod)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          # Variable scoped to the prod Environment — only this job sees it.
-          role-to-assume: ${{ vars.AWS_ROLE_ARN_PROD }}
+          # Variable env-scoped to the prod Environment — only this job
+          # (which declares `environment: prod`) can read it.
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: us-east-1
 
       - name: Login to ECR (prod)

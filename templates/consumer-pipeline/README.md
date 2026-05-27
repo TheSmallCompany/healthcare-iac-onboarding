@@ -43,21 +43,21 @@ the contract PR merges and the foundation stack provisions your roles.
 5. Push to `main` — first run should produce a green build, image push,
    and overlay-bump PR for `dev`.
 
-## Pre-flight diagnostics
+## Environment variable convention
 
-Each environment job in `build-and-promote.yml` runs a `Pre-flight: assert
-AWS_ROLE_ARN_<ENV> is set` step before `configure-aws-credentials@v6`. If
-you forget to set the corresponding repo variable (e.g., `AWS_ROLE_ARN_DEV`),
-the dev build job fails fast with a precise pointer:
+Each env job (`build-dev`, `promote-staging`, `promote-prod`) and the
+`status` job declare a job-level `environment:`. The bot writes a single
+env-scoped variable `AWS_ROLE_ARN` to each GitHub Environment on `/bind`
+— GitHub's variable-scoping rules then ensure each job reads its own
+environment's role. No suffix-by-string switching, no per-env variable
+names. See `ONBOARDING.md` for the verification step (`gh variable list
+--env <env>`) and the troubleshooting flow if a variable is missing.
 
-```
-::error::AWS_ROLE_ARN_DEV repo variable is empty. Set it under
-Settings → Secrets and variables → Actions → Variables → Repository
-variables. ARN format: arn:aws:iam::<account>:role/hiac-<customer>-dev-deploy
-```
-
-— instead of the cryptic `Could not load credentials from any providers`
-you'd otherwise see from the AWS SDK several steps later.
+The reference template assumes this convention. If you copied an
+earlier version that used `vars.AWS_ROLE_ARN_DEV / _STAGING / _PROD`
+plus `Pre-flight: assert AWS_ROLE_ARN_<ENV>` steps, see
+[ADR-056 M7 / D1](https://github.com/TheSmallCompany/healthcare-iac/issues/1288)
+for the migration.
 
 ## What's NOT in these templates
 
