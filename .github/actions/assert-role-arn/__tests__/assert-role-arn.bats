@@ -28,6 +28,48 @@ ACTION_YML="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/action.yml"
   ! grep -E '\$\{\{[^}]*vars\.' "$ACTION_YML"
 }
 
+# ── D1: env-scoped vars.AWS_ROLE_ARN convention (healthcare-iac#1288) ─
+# ADR-056 M7 retro decision: bot writes env-scoped `AWS_ROLE_ARN` (no
+# suffix) to each GitHub Environment on /bind. The reference template
+# must match the convention exactly — both for it to actually work, and
+# so the convention is documented by the template itself. Pre-flight
+# assertions in env jobs go away (env-scoped vars don't need them; the
+# bot guarantees they're set).
+#
+# The status job (which runs without an env-scope by default) gets a
+# job-level `environment: dev` so env-scoped vars resolve there too.
+# Functionally fine — sleep-state SSM read just needs SOME OIDC role,
+# any env's works.
+
+TEMPLATE_YML="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/templates/consumer-pipeline/build-and-promote.yml"
+STATUS_EXAMPLE="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/templates/consumer-pipeline/healthcare-iac-status.example"
+
+@test "D1: build-and-promote.yml has zero legacy vars.AWS_ROLE_ARN_<ENV> refs" {
+  ! grep -E 'vars\.AWS_ROLE_ARN_(DEV|STAGING|PROD)' "$TEMPLATE_YML"
+}
+
+@test "D1: build-and-promote.yml has exactly 4 vars.AWS_ROLE_ARN refs (1 status + 3 env jobs)" {
+  # Anchor to actual ${{ }} expressions, not the literal in comments.
+  local count
+  count=$(grep -cE '\$\{\{[[:space:]]*vars\.AWS_ROLE_ARN([^_A-Z]|$)' "$TEMPLATE_YML")
+  [ "$count" -eq 4 ]
+}
+
+@test "D1: build-and-promote.yml does not invoke assert-role-arn (pre-flight steps removed)" {
+  ! grep -E 'uses:.*assert-role-arn' "$TEMPLATE_YML"
+}
+
+@test "D1: build-and-promote.yml status job declares environment: dev so env-scoped vars resolve" {
+  # Scan the 'status:' job's block (until the next top-level job key) for
+  # an `environment: dev` line at job-metadata indentation.
+  awk '/^  status:/{f=1; next} /^  [a-z][a-zA-Z0-9_-]*:$/{f=0} f' "$TEMPLATE_YML" \
+    | grep -qE '^[[:space:]]+environment:[[:space:]]+dev([[:space:]]|$|#)'
+}
+
+@test "D1: healthcare-iac-status.example uses env-scoped vars.AWS_ROLE_ARN (no legacy suffix)" {
+  ! grep -E 'vars\.AWS_ROLE_ARN_(DEV|STAGING|PROD)' "$STATUS_EXAMPLE"
+}
+
 # ── Failure modes ────────────────────────────────────────────────────
 
 @test "F58-pt3 assert: empty role-arn (env=dev) → exit 1 + AWS_ROLE_ARN_DEV-named empty error" {

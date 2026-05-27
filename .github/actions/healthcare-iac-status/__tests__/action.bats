@@ -495,12 +495,21 @@ MOCK
 # not hardcoded. RED until action.yml declares the input + uses it.
 
 @test "F74-aud: action.yml declares inputs.audience with default 'healthcare-iac-status'" {
+  # Python-free YAML key lookup. Walks the file, enters the `audience:`
+  # input block at 2-space indent, exits at the next 2-space-indent key,
+  # and inside the block extracts `default: "<value>"` at 4-space indent.
+  # Avoids pyyaml so the test runs under any python (or no python).
   local default
-  default=$(python3 -c "
-import yaml,sys
-d = yaml.safe_load(open('.github/actions/healthcare-iac-status/action.yml'))
-print((d.get('inputs',{}).get('audience',{}) or {}).get('default',''))
-" 2>/dev/null)
+  default=$(awk '
+    /^  audience:/ { in_aud=1; next }
+    in_aud && /^  [a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ { exit }
+    in_aud && /^    default:[[:space:]]+/ {
+      sub(/^[[:space:]]+default:[[:space:]]+/, "")
+      gsub(/^"|"$/, "")
+      print
+      exit
+    }
+  ' .github/actions/healthcare-iac-status/action.yml)
   [ "$default" = "healthcare-iac-status" ]
 }
 

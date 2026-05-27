@@ -110,3 +110,24 @@ jobs:
             done < <(grep -rn -E "uses:[[:space:]]*${action}@" templates/ --include='*.yml' --include='*.yaml' --include='*.example' || true)
           done
           exit $fail
+
+      # No-legacy-AWS_ROLE_ARN-suffix verification — env-scoped
+      # vars.AWS_ROLE_ARN replaced vars.AWS_ROLE_ARN_<ENV> in the
+      # reference template per ADR-056 M7 / D1 (healthcare-iac#1288).
+      # A drift back to the suffix form means: variable won't resolve
+      # at runtime (bot only writes the suffix-free form), and the
+      # template's convention diverges from the bot's behavior.
+      - name: No legacy AWS_ROLE_ARN_<ENV> refs in templates/
+        run: |
+          set -euo pipefail
+          matches=$(grep -rnE 'vars\.AWS_ROLE_ARN_(DEV|STAGING|PROD)' \
+            templates/ --include='*.yml' --include='*.yaml' --include='*.example' \
+            || true)
+          if [ -n "$matches" ]; then
+            echo "FAIL legacy vars.AWS_ROLE_ARN_<ENV> refs in templates/"
+            echo "     (use env-scoped vars.AWS_ROLE_ARN — ADR-056 M7 / D1,"
+            echo "     healthcare-iac#1288):"
+            echo "$matches"
+            exit 1
+          fi
+          echo "OK   no legacy vars.AWS_ROLE_ARN_<ENV> refs in templates/"

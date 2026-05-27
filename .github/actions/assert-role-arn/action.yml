@@ -1,18 +1,29 @@
 # assert-role-arn — Composite action.
 #
-# Pre-flight assertion for the AWS_ROLE_ARN_<ENV> repo variable. Used
-# by the reference consumer-pipeline template's three env jobs to fail
-# fast at the right step when the variable is missing or malformed,
-# instead of letting an empty value fall through to
-# configure-aws-credentials@v6's generic "Could not load credentials".
+# Pre-flight assertion for the legacy `vars.AWS_ROLE_ARN_<ENV>` repo
+# variables. Originally used by the reference consumer-pipeline template
+# to fail fast when a per-env suffix variable was missing.
+#
+# DEPRECATED 2026-05-27 (ADR-056 M7 / D1, healthcare-iac#1288).
+# The reference template no longer calls this action — the bot now
+# writes env-scoped `vars.AWS_ROLE_ARN` (no suffix) to each GitHub
+# Environment on /bind, so a missing variable surfaces as an env-scope
+# resolution error in configure-aws-credentials itself, with no
+# pre-flight indirection needed.
+#
+# This action is kept for backward compat — any customer who copied the
+# pre-D1 template can still use it. Will be removed in a follow-up after
+# the existing customer base has migrated.
 #
 # F58 part 3.
 ---
-name: "Assert role ARN"
+name: "Assert role ARN (DEPRECATED — see ADR-056 M7 / D1)"
 description: >
-  Pre-flight check that AWS_ROLE_ARN_<ENV> is set and looks like an
-  IAM role ARN. Fails the step with a workflow-local error naming the
-  variable + remediation location.
+  [DEPRECATED 2026-05-27 — healthcare-iac#1288]
+  Pre-flight check that the legacy suffix-form `AWS_ROLE_ARN_<ENV>` is
+  set and looks like an IAM role ARN. Superseded by env-scoped
+  `vars.AWS_ROLE_ARN` in the post-D1 reference template; new
+  workflows should not call this action.
 
 inputs:
   env:

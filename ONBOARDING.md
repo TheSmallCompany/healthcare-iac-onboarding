@@ -184,7 +184,14 @@ issue. You'll see something like:
 
 In your repo: **Settings → Environments → New environment**.
 
-Create two:
+Create **three**: `dev`, `staging`, `prod`.
+
+### `dev`
+
+- **Required reviewers**: leave empty.
+- **Deployment branches**: "All branches" (the trust policy in your dev
+  role accepts pushes from any branch; the Environment exists only to
+  provide a scope for the `AWS_ROLE_ARN` variable — not to gate).
 
 ### `staging`
 
@@ -199,34 +206,39 @@ Create two:
   call.
 - **Deployment branches**: "Selected branches" → `main` only.
 
-Why no `dev` Environment: dev is "any-ref"; the trust policy in your
-dev role accepts pushes from any branch. No GitHub Environment is
-needed (any Environment would just add friction).
+> Why a `dev` Environment when dev has no gating: the bot writes an
+> env-scoped `AWS_ROLE_ARN` to each Environment on `/bind`, and the
+> reference template's `status` and `build-dev` jobs declare
+> `environment: dev` so they can read it. The Environment is purely a
+> variable-scope; it doesn't add reviewer or branch friction.
 
-## Step 8 — Configure repo + environment variables
+## Step 8 — Verify env-scoped `AWS_ROLE_ARN` variables
 
-In your repo: **Settings → Secrets and variables → Actions**.
+The bot automatically wrote an env-scoped `AWS_ROLE_ARN` variable to
+each Environment (`dev`, `staging`, `prod`) on `/bind` — one variable
+name across all envs, with the per-env ARN value. **You don't configure
+these manually.** Just verify they landed:
 
-### Repo-level (under the **Variables** tab, **Repository variables**)
+```sh
+gh variable list --env dev
+gh variable list --env staging
+gh variable list --env prod
+```
 
-| Name               | Value                   |
-| ------------------ | ----------------------- |
-| `AWS_ROLE_ARN_DEV` | the dev ARN from step 6 |
+Each should show one variable `AWS_ROLE_ARN` whose value is the matching
+ARN from Step 6. If any are missing, re-run `/bind` on your onboarding
+issue.
 
-### Environment-level (under each Environment, **Variables** tab)
-
-| Name                   | Environment | Value           |
-| ---------------------- | ----------- | --------------- |
-| `AWS_ROLE_ARN_STAGING` | `staging`   | the staging ARN |
-| `AWS_ROLE_ARN_PROD`    | `prod`      | the prod ARN    |
-
-> **Why scoped variables.** A variable scoped to the prod Environment
-> is only readable by jobs that declare `environment: prod` — and
-> those are the same jobs gated by required-reviewer approval. A
+> **Why env-scoped variables.** A variable scoped to the prod
+> Environment is only readable by jobs that declare `environment: prod`
+> — and those are the same jobs gated by required-reviewer approval. A
 > compromised dev workflow can't read the prod ARN, which is half of
 > what stops it from assuming the prod role; the OIDC sub-claim
 > mismatch (your job didn't go through the `prod` Environment, so
 > `sub` doesn't include `environment:prod`) is the other half.
+> Using one suffix-free variable name (`AWS_ROLE_ARN`) lets the
+> reference workflow read the right env's role without env-aware
+> string switching.
 
 ## Step 9 — Copy the reference workflow
 
@@ -282,8 +294,12 @@ You can confirm the deploy with:
 
 ```sh
 CUSTOMER=acme1
+# Paste the dev ARN from Step 6 directly (these CLI calls run on your
+# laptop, not inside a GitHub Actions job, so the env-scoped variable
+# isn't reachable here).
+DEV_ROLE_ARN="arn:aws:iam::<dev-account>:role/hiac-${CUSTOMER}-dev-github-actions"
 aws eks update-kubeconfig --name healthcare-dev --region us-east-1 \
-  --role-arn "$AWS_ROLE_ARN_DEV"
+  --role-arn "$DEV_ROLE_ARN"
 kubectl -n "${CUSTOMER}-app" get pods -o wide
 ```
 
@@ -345,8 +361,10 @@ After fixing, re-run `/bind` on the issue.
 
 Three common causes:
 
-1. **Wrong ARN for the environment.** Confirm
-   `vars.AWS_ROLE_ARN_STAGING` is the staging ARN, not the dev one.
+1. **Wrong ARN for the environment.** Confirm the `staging`
+   Environment's `AWS_ROLE_ARN` variable holds the staging ARN, not the
+   dev one (run `gh variable list --env staging`). If the bot wrote the
+   wrong value, re-run `/bind`.
 2. **OIDC sub-claim mismatch.** Your job didn't run inside the right
    Environment. Add `environment: staging` (or `prod`) to the job.
 3. **DynamoDB status flipped to `unverified`.** Look at the latest
