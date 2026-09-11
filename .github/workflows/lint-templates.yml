@@ -62,15 +62,51 @@ jobs:
             checked=$((checked + 1))
             owner_repo="${ref%@*}"
             rev="${ref#*@}"
-            if gh api "repos/$owner_repo/git/refs/tags/$rev" >/dev/null 2>&1; then
-              echo "OK   tag    $ref ($file:$line)"
-            elif gh api "repos/$owner_repo/git/refs/heads/$rev" >/dev/null 2>&1; then
-              echo "OK   branch $ref ($file:$line)"
-            elif gh api "repos/$owner_repo/commits/$rev" >/dev/null 2>&1; then
-              echo "OK   commit $ref ($file:$line)"
-            else
+
+            # Resolution is attempted with credentials first, then ANONYMOUSLY.
+            #
+            # An organization with an IP allow list rejects *credentialed* reads
+            # of its resources from IPs outside that list — including
+            # GitHub-hosted runner IPs, and including its PUBLIC repositories.
+            # Observed 2026-09-11 for `aquasecurity`: from a runner,
+            #   authenticated -> 403 "the `aquasecurity` organization has an IP
+            #                         allow list enabled"
+            #   anonymous     -> 200
+            # while the same authenticated call from a laptop returns 200.
+            #
+            # Without the anonymous fallback this lint reports "ref does not
+            # resolve" for a perfectly valid pin — a failure message that names
+            # the wrong cause and sends the reader looking for a typo in a tag
+            # that exists. `uses:` resolution at runtime does not go through
+            # this API at all, so the pipeline itself is unaffected.
+            resolved=""
+            for kind_path in "tag:git/refs/tags/$rev" "branch:git/refs/heads/$rev" "commit:commits/$rev"; do
+              kind="${kind_path%%:*}"
+              path="${kind_path#*:}"
+              if gh api "repos/$owner_repo/$path" >/dev/null 2>&1; then
+                resolved="$kind"
+                break
+              fi
+              code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                       "https://api.github.com/repos/$owner_repo/$path" 2>/dev/null || echo 000)
+              if [ "$code" = "200" ]; then
+                resolved="$kind (anon — credentialed probe blocked by an org IP allow list)"
+                break
+              fi
+              if [ "$code" = "429" ]; then
+                echo "UNDETERMINED anonymous API rate limit hit while checking $ref ($file:$line)"
+                echo "             This is not a verdict on the ref. Re-run the job."
+                resolved="undetermined"
+                fail=1
+                break
+              fi
+            done
+
+            if [ -z "$resolved" ]; then
               echo "FAIL ref does not resolve: $ref ($file:$line)"
               fail=1
+            elif [ "$resolved" != "undetermined" ]; then
+              echo "OK   $resolved $ref ($file:$line)"
             fi
           done < <(grep -rn -E '^[[:space:]]*-?[[:space:]]*uses:' templates/ --include='*.yml' --include='*.yaml' --include='*.example' || true)
           echo "---"
