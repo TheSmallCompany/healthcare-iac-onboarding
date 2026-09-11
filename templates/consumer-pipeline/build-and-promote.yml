@@ -162,6 +162,63 @@ jobs:
             -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
             .
 
+      # ── Shift-left image scan (healthcare-iac#2396) ──────────────────
+      # Scans the image that was just built, BEFORE it is pushed. A HIGH or
+      # CRITICAL vulnerability that has a fix available fails the job, so the
+      # vulnerable artifact never reaches ECR at all.
+      #
+      # Threshold rationale, recorded deliberately:
+      #
+      #   severity: HIGH,CRITICAL
+      #       Failing on every MEDIUM against a typical base image blocks all
+      #       work; failing on nothing is theatre. Measured 2026-09-11 with
+      #       these exact flags: `alpine:latest` 2 findings, `python:3.9-slim`
+      #       58, `gcr.io/distroless/static-debian12:nonroot` 0 — the
+      #       threshold discriminates.
+      #
+      #   ignore-unfixed: true
+      #       A CVE with no upstream fix cannot be actioned by rebuilding.
+      #       Amazon Inspector's continuous rescan keeps reporting those until
+      #       a fix ships — that is its job, not this gate's.
+      #
+      #   exit-code: "1"
+      #       WITHOUT this the action prints a findings table and the step
+      #       ALWAYS succeeds. A scanner that cannot fail is worse than no
+      #       scanner because it looks like coverage.
+      #
+      #   TRIVY_IMAGE_SRC: docker
+      #       Trivy's default source order is docker,containerd,podman,remote.
+      #       If the locally-built image were missing or mis-tagged, Trivy
+      #       would SILENTLY pull the previous image from ECR and scan that
+      #       instead — reporting clean while the new, unscanned image goes
+      #       up. Pinning the source to `docker` turns that into a loud
+      #       failure.
+      #
+      # The image reference uses `${{ env.* }}` rather than the shell
+      # `${ECR_REPO_PREFIX}` form the build and push steps use: a `with:`
+      # block is not shell, so `${VAR}` would reach Trivy as literal text.
+      # Both spellings resolve to the same image.
+      #
+      # Suppressing a finding: add it to `.trivyignore` at the root of YOUR
+      # repo — Trivy reads that path by default, no workflow change needed —
+      # together with an entry in your exceptions register. Prefer an expiry:
+      # `CVE-2026-1234 exp:2026-12-31`. Never suppress by lowering `severity`
+      # or `exit-code`; that silently disables the gate for every future
+      # finding, not just the one you accepted.
+      - name: Scan image (Trivy)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Never fall back to pulling from the registry — see rationale above.
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -218,6 +275,24 @@ jobs:
             -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
             .
 
+      # Shift-left image scan — scans the built image before it is pushed.
+      # Full threshold rationale on the build-dev job above. Keep this config
+      # identical across dev / staging / prod: a prod gate weaker than the dev
+      # gate is the classic drift.
+      - name: Scan image (Trivy, staging)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Never fall back to pulling from the registry — see rationale above.
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -271,6 +346,24 @@ jobs:
           docker build \
             -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
             .
+
+      # Shift-left image scan — scans the built image before it is pushed.
+      # Full threshold rationale on the build-dev job above. Keep this config
+      # identical across dev / staging / prod: a prod gate weaker than the dev
+      # gate is the classic drift.
+      - name: Scan image (Trivy, prod)
+        uses: aquasecurity/trivy-action@v0.36.0
+        env:
+          # Never fall back to pulling from the registry — see rationale above.
+          TRIVY_IMAGE_SRC: docker
+        with:
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          scanners: vuln
+          vuln-type: os,library
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3

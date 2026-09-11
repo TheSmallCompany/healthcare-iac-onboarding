@@ -8,7 +8,7 @@ cadence.
 
 | File                            | What it is                                                                                                                                                                                      |
 | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `build-and-promote.yml`         | The GitHub Actions workflow customers copy into `.github/workflows/`. Builds + signs + pushes a container image, opens an overlay-bump PR, and gates promotion through `healthcare-iac-status`. |
+| `build-and-promote.yml`         | The GitHub Actions workflow customers copy into `.github/workflows/`. Builds, **scans**, signs and pushes a container image, opens an overlay-bump PR, and gates promotion through `healthcare-iac-status`. |
 | `healthcare-iac-status.example` | A small snippet showing how to call the `healthcare-iac-status` composite action with the right inputs.                                                                                         |
 | `kustomization-bump.example`    | What an auto-generated overlay-bump PR looks like — the diff customers will see when their image promotes through environments.                                                                 |
 | `kyverno-image-signing.example` | The cluster-side Kyverno verify-image policy snippet that runs in the workload account. Reference only — the policy is applied by healthcare-iac, not the customer.                             |
@@ -58,6 +58,53 @@ variables. ARN format: arn:aws:iam::<account>:role/hiac-<customer>-dev-deploy
 
 — instead of the cryptic `Could not load credentials from any providers`
 you'd otherwise see from the AWS SDK several steps later.
+
+## Image scanning
+
+Every build job scans the image with [Trivy][trivy] **between `docker build`
+and `docker push`**. A HIGH or CRITICAL vulnerability that has a fix available
+fails the job, so the vulnerable artifact never reaches ECR at all.
+
+The threshold is `severity: HIGH,CRITICAL` with `ignore-unfixed: true`, so
+everything it reports is actionable by rebuilding on a patched base image.
+Measured 2026-09-11 with those exact flags: `alpine:latest` 2 findings,
+`python:3.9-slim` 58, `gcr.io/distroless/static-debian12:nonroot` 0. The
+threshold discriminates — it is neither theatre nor a blanket block.
+
+### If the scan fails your build
+
+In order of preference:
+
+1. **Rebuild on a patched base image.** Most findings disappear here.
+2. **Upgrade the offending package.**
+3. **Drop the package** if your image does not need it. Distroless and static
+   base images carry almost nothing.
+4. **Suppress it, with an expiry.** Add the advisory to `.trivyignore` at the
+   root of your repo — Trivy reads that path automatically, no workflow change
+   needed — and give it an expiry date:
+
+   ```
+   # member-service ships no HTTP server; CVE is unreachable. Fix due in 1.4.
+   CVE-2026-1234 exp:2026-12-31
+   ```
+
+   Record the decision in your own exceptions register: what was suppressed,
+   why it is safe, who accepted it, and when it must be re-validated.
+
+**Do not** suppress by lowering `severity` or setting `exit-code: "0"`. Either
+one disables the gate for every future finding rather than the one you
+accepted, and the scan still appears in your logs — so the pipeline looks
+scanned while nothing can ever block.
+
+### This does not replace runtime scanning
+
+Amazon Inspector runs against what is already in ECR and rescans continuously.
+The two cover different windows: no build-time gate can find a CVE that did
+not exist when it ran, and Inspector only sees images that already reached the
+registry. This gate's win is that Inspector goes quiet, not that it becomes
+unnecessary.
+
+[trivy]: https://trivy.dev/
 
 ## What's NOT in these templates
 
