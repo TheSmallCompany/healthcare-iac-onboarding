@@ -236,7 +236,7 @@ jobs:
 
       - name: Login to ECR
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image (${{ matrix.service.name }})
         run: |
@@ -358,7 +358,7 @@ jobs:
 
       - name: Login to ECR (staging)
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image (staging, ${{ matrix.service.name }})
         run: |
@@ -436,7 +436,7 @@ jobs:
 
       - name: Login to ECR (prod)
         id: ecr
-        uses: aws-actions/amazon-ecr-login@v3
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image (prod, ${{ matrix.service.name }})
         run: |
