@@ -8,16 +8,32 @@
 # your application evolves.
 #
 # What it does (pull-deploy model — the default):
-#   1. Build a container image.
-#   2. Sign the image with cosign keyless (Sigstore).
-#   3. Push to your customer-scoped ECR repository in the dev account.
-#   4. Open an overlay-bump PR in healthcare-iac/deploy/overlays/dev/
-#      (auto-merged for dev). ArgoCD reconciles the new image.
-#   5. On `staging` Environment dispatch: re-sign + push to staging ECR,
+#   1. Read ecr_repositories.repositories[] from your infra-contract.yaml
+#      and build each declared service in a GHA matrix (resolve-services
+#      job). Single-image consumers (one repository entry, no `build:`
+#      block) get a single-element matrix automatically — no special-case
+#      configuration required.
+#   2. Build each container image (matrix.service.dockerfile,
+#      matrix.service.context).
+#   3. Sign each image with cosign keyless (Sigstore).
+#   4. Push each image to its customer-scoped ECR repository in the dev
+#      account.
+#   5. Open an overlay-bump PR in healthcare-iac/deploy/overlays/dev/
+#      (auto-merged for dev). ArgoCD reconciles the new images.
+#   6. On `staging` Environment dispatch: re-sign + push to staging ECR,
 #      open an overlay-bump PR for staging (gated by Environment
 #      reviewers).
-#   6. On `prod` Environment dispatch: re-sign + push to prod ECR, open
+#   7. On `prod` Environment dispatch: re-sign + push to prod ECR, open
 #      an overlay-bump PR for prod (gated by Environment reviewers).
+#
+# Why contract-driven matrix (ADR-47 P7b item 9, iac#1299):
+#   The service list already lives in your infra-contract.yaml under
+#   ecr_repositories.repositories[]. Reading from there means single-
+#   image and multi-image consumers use the same workflow without forks,
+#   and per-service Dockerfile/context can live with the rest of the
+#   contract (under optional `build:` blocks). The resolve-services job
+#   reads the contract via yq and emits matrix JSON; downstream jobs
+#   consume it via fromJSON(needs.resolve-services.outputs.matrix).
 #
 # Why scoped role ARN variables: your repo doesn't see the prod ARN
 # unless your job is gated by the prod Environment, defending against a
@@ -36,6 +52,15 @@ on:
         required: true
         type: choice
         options: [staging, prod]
+  # ADR-47 §D2 (iac#1290) — bot-driven re-fire after a contract-sync
+  # PR merges. The consumer-onboarding bot POSTs repository_dispatch
+  # with this event_type because GitHub suppresses push triggers on
+  # App-authored merges (anti-recursion). This subscription lets the
+  # build job fire automatically when the customer's contract syncs.
+  # The build job's `if:` condition treats this event identically to
+  # push — same dev-build path.
+  repository_dispatch:
+    types: [healthcare-iac-contract-sync]
 
 permissions:
   contents: read
@@ -45,7 +70,9 @@ permissions:
 env:
   CUSTOMER_CODE: "{{ .CustomerCode }}"
   ECR_REPO_PREFIX: "{{ .EcrRepoPrefix }}"
-  IMAGE_NAME: app # change if your image name differs
+  # IMAGE_NAME removed — per-service name comes from matrix.service.name,
+  # which the resolve-services job derives from
+  # ecr_repositories.repositories[].name in your infra-contract.yaml.
 
 jobs:
   # ───────────────────────────────────────────────────────────────────
@@ -89,10 +116,10 @@ jobs:
   #   unknown     → warn + proceed (defense-in-depth: status is the
   #                  primary gate; sleep-state is supplementary)
   #
-  # The check above outputs `sleep-state` from the SSM parameter
-  # /healthcare/<env>/sleep-state in your workload account. The
-  # consumer's OIDC role grants ssm:GetParameter on that path via the
-  # IAM boundary set by ConsumerCICDModule.
+  # Fail-fast on deep-sleep is enforced by iac#1316 lint
+  # (scripts/lint-template-sleep-gate.sh) — see ADR-47 P7b item 8 for
+  # the decision rationale (silent skip = anti-pattern; loud failure
+  # surfaces stalled deploys via copy-pasteable wake command).
   sleep-gate:
     needs: status
     runs-on: ubuntu-latest
@@ -131,12 +158,67 @@ jobs:
           esac
 
   # ───────────────────────────────────────────────────────────────────
-  # Dev — every main push pushes to dev ECR + auto-bumps dev overlay
+  # Resolve services — read the contract, emit matrix JSON
+  # ───────────────────────────────────────────────────────────────────
+  # Reads ecr_repositories.repositories[] from infra-contract.yaml and
+  # emits a JSON array suitable for `strategy.matrix.service`. Each
+  # element looks like:
+  #
+  #   { "name": "member-service",        # short name (after last /)
+  #     "repo": "platform/member-service", # full repo path (matches ECR)
+  #     "dockerfile": "Dockerfile",      # default if .build.dockerfile absent
+  #     "context": "."                   # default if .build.context absent
+  #   }
+  #
+  # Single-image consumers (one entry, no `build:` block) get a one-
+  # element matrix automatically — no special-case logic. Multi-image
+  # consumers declare per-service `build:` blocks per
+  # docs/consumer-guide.md.
+  #
+  # Schema validation of the optional `build:` block is enforced
+  # provider-side by check_ecr_repositories_block in
+  # scripts/validate-infra-contract.py (iac#1317, PR α of item 9).
+  resolve-services:
+    needs: [status, sleep-gate]
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install yq
+        uses: mikefarah/yq@master
+      - id: read
+        run: |
+          set -euo pipefail
+          MATRIX=$(yq -o=json -I=0 '[
+            .ecr_repositories.repositories[]
+            | {
+                "name":       (.name | split("/") | .[-1]),
+                "repo":       .name,
+                "dockerfile": (.build.dockerfile // "Dockerfile"),
+                "context":    (.build.context    // ".")
+              }
+          ]' infra-contract.yaml)
+          echo "Resolved $(echo "$MATRIX" | jq 'length') service(s) from infra-contract.yaml"
+          echo "$MATRIX" | jq .
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  # ───────────────────────────────────────────────────────────────────
+  # Dev — every main push pushes each service to dev ECR + auto-bumps
+  # the dev overlay
   # ───────────────────────────────────────────────────────────────────
   build-dev:
-    needs: [status, sleep-gate]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [status, sleep-gate, resolve-services]
+    # Fires on direct main pushes OR bot-driven repository_dispatch
+    # (ADR-47 §D2 — bot's post-merge re-fire after a contract-sync PR
+    # merges; GitHub's anti-recursion suppresses the equivalent push
+    # trigger). Both paths drive the same dev build.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'repository_dispatch' && github.event.action == 'healthcare-iac-contract-sync')
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.resolve-services.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -156,18 +238,19 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image
+      - name: Build image (${{ matrix.service.name }})
         run: |
           docker build \
-            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
-            .
+            -f "${{ matrix.service.dockerfile }}" \
+            -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
+            "${{ matrix.service.context }}"
 
-      # ── Shift-left image scan (healthcare-iac#2396) ──────────────────
+      # ── Shift-left image scan (iac#2396) ─────────────────────────────
       # Scans the image that was just built, BEFORE it is pushed. A HIGH or
       # CRITICAL vulnerability that has a fix available fails the job, so the
       # vulnerable artifact never reaches ECR at all.
       #
-      # Threshold rationale, recorded deliberately:
+      # Threshold rationale — recorded deliberately per iac#2396 item 2:
       #
       #   severity: HIGH,CRITICAL
       #       Failing on every MEDIUM against a typical base image blocks all
@@ -179,12 +262,12 @@ jobs:
       #   ignore-unfixed: true
       #       A CVE with no upstream fix cannot be actioned by rebuilding.
       #       Amazon Inspector's continuous rescan keeps reporting those until
-      #       a fix ships — that is its job, not this gate's.
+      #       a fix ships — that is its job, not this gate's (iac#2246).
       #
       #   exit-code: "1"
-      #       WITHOUT this the action prints a findings table and the step
-      #       ALWAYS succeeds. A scanner that cannot fail is worse than no
-      #       scanner because it looks like coverage.
+      #       WITHOUT this the action prints a findings table and ALWAYS
+      #       succeeds. A scanner that cannot fail is worse than no scanner
+      #       because it looks like coverage (iac#2389, iac#2041).
       #
       #   TRIVY_IMAGE_SRC: docker
       #       Trivy's default source order is docker,containerd,podman,remote.
@@ -192,26 +275,28 @@ jobs:
       #       would SILENTLY pull the previous image from ECR and scan that
       #       instead — reporting clean while the new, unscanned image goes
       #       up. Pinning the source to `docker` turns that into a loud
-      #       failure.
-      #
-      # The image reference uses `${{ env.* }}` rather than the shell
-      # `${ECR_REPO_PREFIX}` form the build and push steps use: a `with:`
-      # block is not shell, so `${VAR}` would reach Trivy as literal text.
-      # Both spellings resolve to the same image.
+      #       failure. Verified 2026-09-11: with TRIVY_IMAGE_SRC=docker and no
+      #       daemon, Trivy exits FATAL "unable to find the specified image
+      #       ... in [\"docker\"]" rather than falling back to the registry.
       #
       # Suppressing a finding: add it to `.trivyignore` at the root of YOUR
-      # repo — Trivy reads that path by default, no workflow change needed —
-      # together with an entry in your exceptions register. Prefer an expiry:
-      # `CVE-2026-1234 exp:2026-12-31`. Never suppress by lowering `severity`
-      # or `exit-code`; that silently disables the gate for every future
-      # finding, not just the one you accepted.
-      - name: Scan image (Trivy)
+      # repo (Trivy reads that path by default) together with a matching
+      # register entry, mirroring healthcare-iac's `.gitleaks.toml` →
+      # docs/security/secrets-scan-exceptions.md pattern. See
+      # docs/security/image-scan-exceptions.md for the entry format. Never
+      # suppress by lowering `severity` or `exit-code` — that silently
+      # disables the gate for every future finding, not just the one you
+      # accepted.
+      #
+      # Structurally enforced by scripts/lint-template-image-scan.sh; the
+      # threshold is proven capable of failing by scripts/verify-trivy-gate.sh.
+      - name: Scan image (Trivy, ${{ matrix.service.name }})
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           # Never fall back to pulling from the registry — see rationale above.
           TRIVY_IMAGE_SRC: docker
         with:
-          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${{ github.sha }}"
           scanners: vuln
           vuln-type: os,library
           severity: HIGH,CRITICAL
@@ -222,33 +307,39 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Push image
+      - name: Push image (${{ matrix.service.name }})
         run: |
-          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+          docker push "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
-      - name: Sign image (Sigstore keyless)
+      - name: Sign image (Sigstore keyless, ${{ matrix.service.name }})
         run: |
           cosign sign --yes \
-            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+            "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
-      - name: Open overlay-bump PR (dev)
+      - name: Open overlay-bump PR (dev, ${{ matrix.service.name }})
         # Replace this with whatever overlay-bump tool you use. The
         # canonical implementation in healthcare-iac uses a small
         # GitHub App-authenticated job; consumers can also use
         # nested-action tools like `peter-evans/create-pull-request`.
+        # Multi-service overlay layout (one folder per service) is
+        # tracked under iac#1299 items 2+4.
         run: |
           echo "TODO: open PR against TheSmallCompany/healthcare-iac"
-          echo "      bumping deploy/overlays/dev/${CUSTOMER_CODE}/kustomization.yaml"
+          echo "      bumping deploy/overlays/dev/${CUSTOMER_CODE}/${{ matrix.service.name }}/kustomization.yaml"
           echo "      to image tag ${GITHUB_SHA}"
 
   # ───────────────────────────────────────────────────────────────────
-  # Staging — main-only, GitHub Environment-gated
+  # Staging — Environment-gated; sub-claim must include `environment:staging`
   # ───────────────────────────────────────────────────────────────────
   promote-staging:
-    needs: status
+    needs: [status, resolve-services]
     if: github.event_name == 'workflow_dispatch' && inputs.target_env == 'staging'
     runs-on: ubuntu-latest
     environment: staging # Environment reviewers gate this
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.resolve-services.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -269,23 +360,25 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image (staging)
+      - name: Build image (staging, ${{ matrix.service.name }})
         run: |
           docker build \
-            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
-            .
+            -f "${{ matrix.service.dockerfile }}" \
+            -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
+            "${{ matrix.service.context }}"
 
       # Shift-left image scan — scans the built image before it is pushed.
-      # Full threshold rationale on the build-dev job above. Keep this config
-      # identical across dev / staging / prod: a prod gate weaker than the dev
-      # gate is the classic drift.
-      - name: Scan image (Trivy, staging)
+      # Full threshold rationale on the build-dev job above (iac#2396). The
+      # config MUST stay identical across dev/staging/prod: a prod gate weaker
+      # than the dev gate is enforced against by
+      # scripts/lint-template-image-scan.sh.
+      - name: Scan image (Trivy, staging, ${{ matrix.service.name }})
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           # Never fall back to pulling from the registry — see rationale above.
           TRIVY_IMAGE_SRC: docker
         with:
-          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${{ github.sha }}"
           scanners: vuln
           vuln-type: os,library
           severity: HIGH,CRITICAL
@@ -296,31 +389,35 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Push image (staging)
+      - name: Push image (staging, ${{ matrix.service.name }})
         run: |
-          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+          docker push "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
       # Sigstore keyless required for staging per ADR-47 §D8. The
       # signature's OIDC sub-claim includes `environment:staging`, which
       # the cluster's Kyverno verify-image policy pins.
-      - name: Sign image (Sigstore keyless, staging)
+      - name: Sign image (Sigstore keyless, staging, ${{ matrix.service.name }})
         run: |
           cosign sign --yes \
-            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+            "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
-      - name: Open overlay-bump PR (staging)
+      - name: Open overlay-bump PR (staging, ${{ matrix.service.name }})
         run: |
           echo "TODO: open PR against TheSmallCompany/healthcare-iac"
-          echo "      bumping deploy/overlays/staging/${CUSTOMER_CODE}/kustomization.yaml"
+          echo "      bumping deploy/overlays/staging/${CUSTOMER_CODE}/${{ matrix.service.name }}/kustomization.yaml"
 
   # ───────────────────────────────────────────────────────────────────
   # Prod — Environment-gated; sub-claim must include `environment:prod`
   # ───────────────────────────────────────────────────────────────────
   promote-prod:
-    needs: status
+    needs: [status, resolve-services]
     if: github.event_name == 'workflow_dispatch' && inputs.target_env == 'prod'
     runs-on: ubuntu-latest
     environment: prod # Environment reviewers gate this
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.resolve-services.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6
 
@@ -341,23 +438,25 @@ jobs:
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build image (prod)
+      - name: Build image (prod, ${{ matrix.service.name }})
         run: |
           docker build \
-            -t "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}" \
-            .
+            -f "${{ matrix.service.dockerfile }}" \
+            -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
+            "${{ matrix.service.context }}"
 
       # Shift-left image scan — scans the built image before it is pushed.
-      # Full threshold rationale on the build-dev job above. Keep this config
-      # identical across dev / staging / prod: a prod gate weaker than the dev
-      # gate is the classic drift.
-      - name: Scan image (Trivy, prod)
+      # Full threshold rationale on the build-dev job above (iac#2396). The
+      # config MUST stay identical across dev/staging/prod: a prod gate weaker
+      # than the dev gate is enforced against by
+      # scripts/lint-template-image-scan.sh.
+      - name: Scan image (Trivy, prod, ${{ matrix.service.name }})
         uses: aquasecurity/trivy-action@v0.36.0
         env:
           # Never fall back to pulling from the registry — see rationale above.
           TRIVY_IMAGE_SRC: docker
         with:
-          image-ref: "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO_PREFIX }}${{ env.IMAGE_NAME }}:${{ github.sha }}"
+          image-ref: "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${{ github.sha }}"
           scanners: vuln
           vuln-type: os,library
           severity: HIGH,CRITICAL
@@ -368,20 +467,20 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Push image (prod)
+      - name: Push image (prod, ${{ matrix.service.name }})
         run: |
-          docker push "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+          docker push "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
       # Sigstore keyless required for prod per ADR-47 §D8. The signature's
       # OIDC sub-claim includes `environment:prod`, which the cluster's
       # Kyverno verify-image policy pins — only signatures produced by
       # this exact prod-gated job satisfy admission.
-      - name: Sign image (Sigstore keyless, prod)
+      - name: Sign image (Sigstore keyless, prod, ${{ matrix.service.name }})
         run: |
           cosign sign --yes \
-            "${{ steps.ecr.outputs.registry }}/${ECR_REPO_PREFIX}${IMAGE_NAME}:${GITHUB_SHA}"
+            "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}"
 
-      - name: Open overlay-bump PR (prod)
+      - name: Open overlay-bump PR (prod, ${{ matrix.service.name }})
         run: |
           echo "TODO: open PR against TheSmallCompany/healthcare-iac"
-          echo "      bumping deploy/overlays/prod/${CUSTOMER_CODE}/kustomization.yaml"
+          echo "      bumping deploy/overlays/prod/${CUSTOMER_CODE}/${{ matrix.service.name }}/kustomization.yaml"
