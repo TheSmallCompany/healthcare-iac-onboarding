@@ -245,6 +245,14 @@ jobs:
             -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
             "${{ matrix.service.context }}"
 
+      - name: Check .trivyignore against the exceptions register
+        # Every suppressed finding needs an ISE-NNN register entry (iac#2641).
+        # Runs before the scan so an undocumented suppression fails the build
+        # before it can silence anything.
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/trivyignore-register-check@main
+        with:
+          register-path: docs/security/image-scan-exceptions.md
+
       # ── Shift-left image scan (iac#2396) ─────────────────────────────
       # Scans the image that was just built, BEFORE it is pushed. A HIGH or
       # CRITICAL vulnerability that has a fix available fails the job, so the
@@ -367,6 +375,14 @@ jobs:
             -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
             "${{ matrix.service.context }}"
 
+      - name: Check .trivyignore against the exceptions register
+        # Every suppressed finding needs an ISE-NNN register entry (iac#2641).
+        # Runs before the scan so an undocumented suppression fails the build
+        # before it can silence anything.
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/trivyignore-register-check@main
+        with:
+          register-path: docs/security/image-scan-exceptions.md
+
       # Shift-left image scan — scans the built image before it is pushed.
       # Full threshold rationale on the build-dev job above (iac#2396). The
       # config MUST stay identical across dev/staging/prod: a prod gate weaker
@@ -444,6 +460,14 @@ jobs:
             -f "${{ matrix.service.dockerfile }}" \
             -t "${{ steps.ecr.outputs.registry }}/${{ matrix.service.repo }}:${GITHUB_SHA}" \
             "${{ matrix.service.context }}"
+
+      - name: Check .trivyignore against the exceptions register
+        # Every suppressed finding needs an ISE-NNN register entry (iac#2641).
+        # Runs before the scan so an undocumented suppression fails the build
+        # before it can silence anything.
+        uses: TheSmallCompany/healthcare-iac-onboarding/.github/actions/trivyignore-register-check@main
+        with:
+          register-path: docs/security/image-scan-exceptions.md
 
       # Shift-left image scan — scans the built image before it is pushed.
       # Full threshold rationale on the build-dev job above (iac#2396). The
