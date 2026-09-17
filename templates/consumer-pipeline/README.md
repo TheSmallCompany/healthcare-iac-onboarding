@@ -88,13 +88,43 @@ In order of preference:
    CVE-2026-1234 exp:2026-12-31
    ```
 
-   Record the decision in your own exceptions register: what was suppressed,
-   why it is safe, who accepted it, and when it must be re-validated.
+   Record the decision in your exceptions register in the same PR — see
+   [Suppressing a finding](#suppressing-a-finding). The build fails without
+   it.
 
 **Do not** suppress by lowering `severity` or setting `exit-code: "0"`. Either
 one disables the gate for every future finding rather than the one you
 accepted, and the scan still appears in your logs — so the pipeline looks
 scanned while nothing can ever block.
+
+### Suppressing a finding
+
+A `.trivyignore` line is only half of a suppression. The other half is an
+`ISE-NNN` entry in your repository's image-scan exceptions register at
+`docs/security/image-scan-exceptions.md` — the audit record of what was
+suppressed, why it is safe, who accepted it, and when it must be re-validated.
+The entry format (one `## ISE-NNN — <title>` heading per entry, with
+`**Advisory ID**` and `**Re-validate by**` table rows) is defined in
+[healthcare-iac's copy of the register][register]; copy its "Entry format"
+section into yours.
+
+Every build job runs the [`trivyignore-register-check`][register-check] action
+**immediately before the Trivy scan**. It reads `.trivyignore` and
+`.trivyignore.yaml` and fails the build when:
+
+- a suppressed advisory ID (`vulnerabilities` and `secrets` IDs in the YAML
+  form; every ID in the plain form) has no matching `ISE-NNN` entry, or the
+  register file does not exist;
+- a suppression has already expired (`exp:` / `expired_at` before today) but is
+  still present — Trivy already ignores it, so the line is dead and the register
+  entry is misleading;
+- the register exists but cannot be read or parsed, or any date is malformed —
+  undeterminable is not the same as valid.
+
+An entry that is past its `Re-validate by` date produces a warning, not a
+failure. Because the check runs before the scan, an undocumented suppression
+fails the build before it can silence anything — which is why the
+`.trivyignore` line and the register entry belong in the same PR.
 
 ### This does not replace runtime scanning
 
@@ -105,6 +135,8 @@ registry. This gate's win is that Inspector goes quiet, not that it becomes
 unnecessary.
 
 [trivy]: https://trivy.dev/
+[register]: https://github.com/TheSmallCompany/healthcare-iac/blob/main/docs/security/image-scan-exceptions.md
+[register-check]: ../../.github/actions/trivyignore-register-check/
 
 ## What's NOT in these templates
 

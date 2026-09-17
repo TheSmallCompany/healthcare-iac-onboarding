@@ -1,0 +1,54 @@
+# trivyignore-register-check — Composite action.
+#
+# Binds every suppressed container-image finding in a consumer repository's
+# .trivyignore / .trivyignore.yaml to an ISE-NNN entry in that repository's
+# image-scan exceptions register. The reference consumer-pipeline template
+# runs it in every build job IMMEDIATELY BEFORE the Trivy scan, so an
+# undocumented suppression fails the build before it can silence anything.
+#
+# Why it lives here and not in healthcare-iac CI: .trivyignore lives in the
+# consumer repo, which healthcare-iac CI cannot read. The gitleaks register
+# has a provider-side gate (scripts/check-gitleaks-exceptions.sh); this is
+# the consumer-side equivalent for the image-scan register.
+#
+# iac#2641. All logic is in lib/check.sh (bats-tested in __tests__/).
+---
+name: "Check .trivyignore against the exceptions register"
+description: >
+  Fails the build when .trivyignore / .trivyignore.yaml suppresses an
+  advisory ID that has no ISE-NNN entry in the image-scan exceptions
+  register, or still carries an already-expired suppression. Exit 0 pass,
+  1 fail, 2 undetermined (register unreadable or unparseable, malformed
+  date) — undetermined never passes.
+
+inputs:
+  register-path:
+    required: false
+    default: "docs/security/image-scan-exceptions.md"
+    description: >
+      Path, relative to the repository root, of the image-scan exceptions
+      register. healthcare-iac's docs/security/image-scan-exceptions.md is
+      the format reference: one `## ISE-NNN — <title>` heading per entry
+      with `**Advisory ID**` and `**Re-validate by**` table rows.
+  ignore-path:
+    required: false
+    default: ".trivyignore"
+    description: "Path of the plain-format Trivy ignore file (Trivy's default)."
+  ignore-yaml-path:
+    required: false
+    default: ".trivyignore.yaml"
+    description: "Path of the YAML-format Trivy ignore file (Trivy's default)."
+
+runs:
+  using: "composite"
+  steps:
+    - shell: bash
+      env:
+        REGISTER_PATH: ${{ inputs.register-path }}
+        IGNORE_PATH: ${{ inputs.ignore-path }}
+        IGNORE_YAML_PATH: ${{ inputs.ignore-yaml-path }}
+      run: |
+        set -euo pipefail
+        # shellcheck source=lib/check.sh
+        source "${{ github.action_path }}/lib/check.sh"
+        check_trivyignore_register "$REGISTER_PATH" "$IGNORE_PATH" "$IGNORE_YAML_PATH"
