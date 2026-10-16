@@ -14,7 +14,9 @@
     customer-code: "{{ .CustomerCode }}"
     contract-path: "infra-contract.yaml" # path INSIDE your repo
     environment: "dev"
-    aws-role-arn: ${{ vars.AWS_ROLE_ARN_DEV }} # repo variable
+    # Env-scoped variable: the job must declare `environment: <env>` so
+    # `vars.AWS_ROLE_ARN` resolves to that environment's role.
+    aws-role-arn: ${{ vars.AWS_ROLE_ARN }}
     aws-region: us-east-1
 
 # Outputs:
@@ -47,7 +49,8 @@
 #        echo "::notice::infrastructure is ${{ steps.status.outputs.sleep-state }}; skipping"
 #        exit 0
 #
-# 3. Check status for the target environment (the gate that issues your
-#    OIDC token also passes the right ARN, so you don't need to switch
-#    by string here — just feed `${{ vars.AWS_ROLE_ARN_<ENV> }}` and
-#    `environment: "<env>"` into the action).
+# 3. Check status for the target environment. Set `environment: "<env>"`
+#    on the job AND pass `${{ vars.AWS_ROLE_ARN }}` (the bot writes this
+#    env-scoped variable to each GitHub Environment on /bind) — the role
+#    is resolved per environment automatically. No suffix-by-string
+#    switching needed.
