@@ -16,7 +16,7 @@ body:
         **What happens after you submit:**
 
         1. A maintainer triages this issue and assigns it.
-        2. You install the `Healthcare IaC Cross-Repo` GitHub App on the
+        2. You install the `healthcare-iac` GitHub App on the
            repository named below.
         3. You comment `/bind <customer-code> <installation-id> <owner>/<repo>`.
         4. The maintainer reviews and runs the bind; the bot confirms.
@@ -47,7 +47,7 @@ body:
     attributes:
       label: GitHub repository *
       description: |
-        `<owner>/<repo>` you'll deploy from. The Healthcare IaC Cross-Repo App
+        `<owner>/<repo>` you'll deploy from. The healthcare-iac App
         must be installed on this repo (you'll do this after the issue is
         triaged). Only one repo per customer code.
       placeholder: "acme/healthcare-app"
