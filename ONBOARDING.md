@@ -18,7 +18,7 @@ this is automation we built for ourselves and are now generalizing.
 
 > **Audience.** Whoever owns CI/CD for your healthcare application
 > repository. You'll need GitHub repo-admin privileges (to install the
-> Healthcare IaC Cross-Repo App and configure Environments + branch
+> healthcare-iac App and configure Environments + branch
 > protection) and the ability to commit a workflow file to your repo.
 
 > **Prerequisites.** Your repository builds a container image, deploys
@@ -35,8 +35,8 @@ this is automation we built for ourselves and are now generalizing.
    [`Customer Onboarding — Consumer CI/CD`](https://github.com/TheSmallCompany/healthcare-iac-onboarding/issues/new?template=customer-onboarding-cicd.yml).
 2. **A maintainer triages** the issue, assigns themselves, and tells
    you your assigned customer code (e.g., `acme1`).
-3. **Install the Healthcare IaC Cross-Repo App** on your repository
-   ([app page](https://github.com/apps/healthcare-iac-cross-repo)).
+3. **Install the healthcare-iac App** on your repository
+   ([app page](https://github.com/apps/healthcare-iac)).
 4. **Comment `/bind <code> <installation-id> <owner>/<repo>`** on the
    onboarding issue. The maintainer reviews and runs it (the bot only
    acts on maintainer comments).
@@ -92,9 +92,9 @@ This is also when scope gets clarified: if you picked `push-deploy` but
 GitOps would actually fit, the maintainer will suggest `ecr-push`
 instead. Permissions are easier to widen later than to narrow.
 
-## Step 3 — Install the Healthcare IaC Cross-Repo App
+## Step 3 — Install the healthcare-iac App
 
-Go to <https://github.com/apps/healthcare-iac-cross-repo> and click
+Go to <https://github.com/apps/healthcare-iac> and click
 **Install**. On the install screen:
 
 - **Choose**: "Only select repositories" — pick **only** the
